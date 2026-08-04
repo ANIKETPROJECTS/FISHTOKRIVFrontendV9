@@ -178,7 +178,7 @@ export default function ProductDetail() {
     enabled: !!customer,
     staleTime: 0,
   });
-  const liveCoupons = rawProductCoupons.filter(c => !(!!customer && userCouponUsage[c.code]?.isExhausted));
+  const liveCoupons = rawProductCoupons.filter(c => c.visibleOnWebsite !== false && !(!!customer && userCouponUsage[c.code]?.isExhausted));
 
   const dummy = product ? getDummyDetail(product.category) : null;
   const hasDiscount = product?.originalPrice != null && product?.price != null && product.originalPrice > product.price;

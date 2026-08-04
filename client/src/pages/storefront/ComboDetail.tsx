@@ -352,7 +352,7 @@ export default function ComboDetail() {
     enabled: !!customer,
     staleTime: 0,
   });
-  const liveCoupons = (allCoupons ?? []).filter((c) => c.isActive && !(!!customer && userCouponUsage[c.code]?.isExhausted));
+  const liveCoupons = (allCoupons ?? []).filter((c) => c.isActive && c.visibleOnWebsite !== false && !(!!customer && userCouponUsage[c.code]?.isExhausted));
 
   const productMap = Object.fromEntries(products.map((p) => [p.id, p]));
 

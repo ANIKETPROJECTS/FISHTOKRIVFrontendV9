@@ -184,8 +184,8 @@ export function CartDrawer() {
     return c.applicableCustomers.includes(customer.id);
   };
 
-  // Hide exhausted coupons and coupons not targeted at this customer
-  const visibleCartCoupons = cartCoupons.filter(c => !isCouponExhausted(c) && isCouponVisibleToCustomer(c));
+  // Hide exhausted coupons, coupons not targeted at this customer, and coupons hidden from website
+  const visibleCartCoupons = cartCoupons.filter(c => c.visibleOnWebsite !== false && !isCouponExhausted(c) && isCouponVisibleToCustomer(c));
 
   const validateCouponViaApi = async (code: string): Promise<{ valid: boolean; message: string }> => {
     const res = await fetch("/api/coupon/apply", {
