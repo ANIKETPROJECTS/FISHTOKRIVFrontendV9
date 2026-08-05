@@ -79,6 +79,8 @@ npm install
 ```
 The `dev` script uses `tsx` from `node_modules/.bin/tsx` — always run `npm install` after a fresh import or clone before starting the workflow.
 
+The development command loads the existing app environment from `ecosystem.config.cjs` and keeps Replit's preview port at `5000`. The ecosystem file is also used by the existing production/PM2 setup.
+
 ### 2. Configure environment variables
 All required values are documented in `.env.example`. On Replit, set them as **Secrets / env vars** (never commit plaintext credentials):
 

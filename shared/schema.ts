@@ -170,6 +170,11 @@ export type OrderRequest = {
   isExpress?: boolean | null;
   coupon?: OrderCoupon | null;
   paymentMethod?: string | null;
+  paymentStatus?: string | null;
+  payments?: Array<{ mode: string; amount: number; reference?: string; paidAt?: string }> | null;
+  paidAmount?: number | null;
+  dueAmount?: number | null;
+  upiVariant?: string | null;
   superHubId?: string | null;
   subHubId?: string | null;
   subHubName?: string | null;
@@ -215,6 +220,7 @@ export type InsertOrderRequest = {
   couponCode?: string | null;
   discountAmount?: number | null;
   paymentMode?: string | null;
+  upiVariant?: string | null;
   walletAmountUsed?: number | null;
   payments?: Array<{ mode: string; amount: number; reference?: string; paidAt?: string }> | null;
   paidAmount?: number | null;
@@ -326,6 +332,7 @@ export const insertOrderRequestSchema = z.object({
   discountAmount: z.number().nullable().optional(),
   paymentMethod: z.string().nullable().optional(),
   paymentMode: z.string().nullable().optional(),
+  upiVariant: z.string().nullable().optional(),
   walletAmountUsed: z.number().nullable().optional(),
   payments: z.array(z.object({
     mode: z.string(),

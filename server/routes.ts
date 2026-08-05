@@ -14,6 +14,11 @@ import { CustomerDbModel } from "./customerDb";
 import { computeExpiryDate, computeRemainingTime } from "./inventorySync";
 import Razorpay from "razorpay";
 import { createHmac } from "crypto";
+import {
+  buildSuccessfulRazorpayPaymentState,
+  isFtwStorefrontOrder,
+  isSuccessfulRazorpayStatus,
+} from "./razorpayPayment";
 
 declare module "express-session" {
   interface SessionData {
@@ -499,6 +504,27 @@ export async function registerRoutes(
     console.warn("[Razorpay] RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set — payment routes disabled");
   }
 
+  const fetchVerifiedRazorpayPayment = async (
+    razorpayOrderId: string,
+    razorpayPaymentId: string,
+  ) => {
+    if (!razorpay) {
+      throw new Error("Payment service not configured");
+    }
+    const payment = await (razorpay as any).payments.fetch(razorpayPaymentId);
+    if (
+      payment.order_id !== razorpayOrderId ||
+      !isSuccessfulRazorpayStatus(payment.status)
+    ) {
+      return null;
+    }
+    return {
+      id: String(payment.id),
+      orderId: String(payment.order_id),
+      amount: Number(payment.amount ?? 0) / 100,
+    };
+  };
+
   app.post("/api/razorpay/create-order", async (req, res) => {
     if (!razorpay) return res.status(503).json({ message: "Payment service not configured" });
     try {
@@ -592,7 +618,27 @@ export async function registerRoutes(
         ],
       }).lean();
       if (existing) {
-        console.log(`[Razorpay webhook] Order already exists for payment ${razorpayPaymentId} — skipping`);
+        if (isFtwStorefrontOrder(existing as any)) {
+          const paymentState = buildSuccessfulRazorpayPaymentState({
+            total: Number((existing as any).total ?? amountPaid),
+            paymentAmount: amountPaid,
+            paymentId: razorpayPaymentId,
+            existingPayments: (existing as any).payments,
+          });
+          await OrderModel.updateOne(
+            { _id: (existing as any)._id },
+            {
+              $set: {
+                ...paymentState,
+                razorpayOrderId,
+                updatedAt: new Date(),
+              },
+            },
+          );
+          console.log(`[Razorpay webhook] Repaired FTW payment metadata for ${razorpayPaymentId}`);
+        } else {
+          console.log(`[Razorpay webhook] Non-FTW order already exists for payment ${razorpayPaymentId} — skipping`);
+        }
         return res.status(200).json({ message: "Already processed" });
       }
 
@@ -610,14 +656,13 @@ export async function registerRoutes(
       const orderPayload = {
         ...pending.orderPayload,
         razorpayOrderId,
-        payments: [
-          ...walletPayments,
-          { mode: "upi", amount: amountPaid, reference: razorpayPaymentId, paidAt },
-        ],
-        paymentStatus: "paid",
-        paidAmount: amountPaid,
-        dueAmount: 0,
-        paymentMode: "upi",
+        ...buildSuccessfulRazorpayPaymentState({
+          total: Number(pending.orderPayload.total ?? amountPaid),
+          paymentAmount: amountPaid,
+          paymentId: razorpayPaymentId,
+          existingPayments: walletPayments,
+          paidAt: new Date(paidAt),
+        }),
       };
 
       // Create the order via the existing /api/orders route (reuses all validation,
@@ -707,8 +752,59 @@ export async function registerRoutes(
       // bypassed (double network retry, multiple tabs, etc.).
       const upiReference = (input.payments ?? []).find((p: any) => p.mode === "upi" && p.reference)?.reference;
       if (upiReference) {
-        const existing = await getOrderModel().findOne({ "payments.reference": upiReference }).lean() as any;
+        const existing = await getOrderModel().findOne({
+          $or: [
+            { "payments.reference": upiReference },
+            { upiTransactionId: upiReference },
+            ...(input.razorpayOrderId
+              ? [{ razorpayOrderId: input.razorpayOrderId }]
+              : []),
+          ],
+        }).lean() as any;
         if (existing) {
+          if (!input.razorpayOrderId) {
+            return res.status(400).json({ message: "Razorpay order ID is required" });
+          }
+          let verifiedPayment: {
+            id: string;
+            orderId: string;
+            amount: number;
+          } | null;
+          try {
+            verifiedPayment = await fetchVerifiedRazorpayPayment(
+              input.razorpayOrderId,
+              upiReference,
+            );
+          } catch (paymentErr) {
+            console.error("[Razorpay] Duplicate payment verification lookup failed:", paymentErr);
+            return res.status(502).json({ message: "Could not verify Razorpay payment" });
+          }
+          if (!verifiedPayment) {
+            return res.status(400).json({ message: "Razorpay payment is not successful" });
+          }
+
+          if (isFtwStorefrontOrder(existing)) {
+            const paymentState = buildSuccessfulRazorpayPaymentState({
+              total: Number(existing.total ?? verifiedPayment.amount),
+              paymentAmount: verifiedPayment.amount,
+              paymentId: verifiedPayment.id,
+              existingPayments: existing.payments,
+            });
+            const repaired = await getOrderModel().findByIdAndUpdate(
+              existing._id,
+              {
+                $set: {
+                  ...paymentState,
+                  razorpayOrderId: verifiedPayment.orderId,
+                  updatedAt: new Date(),
+                },
+              },
+              { new: true },
+            ).lean();
+            console.log(`[order:dedupe] Repaired FTW payment metadata for ${verifiedPayment.id}`);
+            return res.status(200).json({ ...repaired, id: String(existing._id) });
+          }
+
           console.warn(`[order:dedupe] Duplicate order-create request for razorpay reference=${upiReference} — returning existing order ${existing.orderId ?? existing._id}`);
           return res.status(200).json({ ...existing, id: String(existing._id) });
         }
@@ -994,6 +1090,32 @@ export async function registerRoutes(
       const upiTransactionId =
         (input.payments ?? []).find((p: any) => p.mode === "upi" && p.reference)?.reference ?? null;
 
+      // Never trust client-provided paymentStatus/paidAmount. A Razorpay
+      // reference is paid only after the server confirms the payment belongs
+      // to this Razorpay order and has a successful status.
+      let verifiedRazorpayPayment: {
+        id: string;
+        orderId: string;
+        amount: number;
+      } | null = null;
+      if (input.razorpayOrderId || upiTransactionId) {
+        if (!input.razorpayOrderId || !upiTransactionId) {
+          return res.status(400).json({ message: "Incomplete Razorpay payment details" });
+        }
+        try {
+          verifiedRazorpayPayment = await fetchVerifiedRazorpayPayment(
+            input.razorpayOrderId,
+            upiTransactionId,
+          );
+        } catch (paymentErr) {
+          console.error("[Razorpay] Payment verification lookup failed:", paymentErr);
+          return res.status(502).json({ message: "Could not verify Razorpay payment" });
+        }
+        if (!verifiedRazorpayPayment) {
+          return res.status(400).json({ message: "Razorpay payment is not successful" });
+        }
+      }
+
       // Today's date for deliveryDate fallback
       const now2 = new Date();
       const deliveryDate = input.deliveryDate ??
@@ -1039,6 +1161,23 @@ export async function registerRoutes(
       // Build orderInput in the exact field order used by the admin POS schema.
       // orderId is intentionally omitted here — it is appended LAST via
       // findByIdAndUpdate after the document is saved (matching admin behaviour).
+      const paymentState = verifiedRazorpayPayment
+        ? buildSuccessfulRazorpayPaymentState({
+            total,
+            paymentAmount: verifiedRazorpayPayment.amount,
+            paymentId: verifiedRazorpayPayment.id,
+            existingPayments: input.payments,
+          })
+        : {
+            paymentStatus: input.paymentStatus ?? "unpaid",
+            payments: input.payments ?? [],
+            paidAmount: input.paidAmount ?? 0,
+            dueAmount: input.dueAmount ?? total,
+            paymentMode,
+            upiVariant: input.upiVariant ?? null,
+            upiTransactionId,
+          };
+
       const orderInput: any = {
         customerId: input.customerId ?? null,
         customerName: input.customerName,
@@ -1064,18 +1203,14 @@ export async function registerRoutes(
         couponIds,
         couponCodes,
         coupons,
-        paymentStatus: input.paymentStatus ?? "unpaid",
-        payments: input.payments ?? [],
-        paidAmount: input.paidAmount ?? 0,
-        dueAmount: input.dueAmount ?? total,
-        paymentMode,
+        ...paymentState,
         scheduleType: input.scheduleType ?? "slot",
         deliveryDate,
         timeslotId: input.timeslotId ?? null,
         timeslotLabel: input.timeslotLabel ?? null,
         timeslotStart: input.timeslotStart ?? null,
         timeslotEnd: input.timeslotEnd ?? null,
-        upiTransactionId,
+        razorpayOrderId: verifiedRazorpayPayment?.orderId ?? input.razorpayOrderId ?? null,
       };
 
       const order = await storage.createOrderRequest(orderInput);
