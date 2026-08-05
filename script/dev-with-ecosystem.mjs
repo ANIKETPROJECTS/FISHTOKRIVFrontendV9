@@ -23,8 +23,10 @@ const child = spawn(
   {
     stdio: "inherit",
     env: {
-      ...process.env,
       ...appEnv,
+      // Replit Secrets/environment variables take precedence over the
+      // imported ecosystem defaults when both define the same key.
+      ...process.env,
       NODE_ENV: "development",
       // Replit's web preview is configured for port 5000.
       PORT: process.env.PORT || "5000",
