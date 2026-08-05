@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ChevronLeft } from "lucide-react";
 import type { Category } from "@shared/schema";
+import { isNormalStorefrontProduct } from "@shared/productVisibility";
 
 import fishImg from "@assets/Gemini_Generated_Image_w6wqkkw6wqkkw6wq_(1)_1772713077919.png";
 import prawnsImg from "@assets/Gemini_Generated_Image_5xy0sd5xy0sd5xy0_1772713090650.png";
@@ -46,8 +47,8 @@ export default function CategoryPage() {
   const activeSub = subFilter ? decodeURIComponent(subFilter) : "All";
 
   const categoryProducts = isAll
-    ? (products?.filter((p) => !p.isArchived && !p.batchExpired) || [])
-    : (products?.filter((p) => !p.isArchived && !p.batchExpired && p.category === categoryName) || []);
+    ? (products?.filter((p) => !p.isArchived && !p.batchExpired && isNormalStorefrontProduct(p)) || [])
+    : (products?.filter((p) => !p.isArchived && !p.batchExpired && isNormalStorefrontProduct(p) && p.category === categoryName) || []);
 
   const currentCategory = categories.find((c) => c.name === categoryName);
   const subCategories = currentCategory?.subCategories ?? [];

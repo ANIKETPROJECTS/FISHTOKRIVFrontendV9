@@ -20,6 +20,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useQuery } from "@tanstack/react-query";
 import { SwipeHint } from "@/components/storefront/SwipeHint";
 import type { Product } from "@shared/schema";
+import { isNormalStorefrontProduct } from "@shared/productVisibility";
 
 import weighScaleIcon from "@assets/weight-scale_1774801344716.png";
 import piecesIcon from "@assets/cutlery_1774801395283.png";
@@ -187,7 +188,7 @@ export default function ProductDetail() {
     : 0;
   const strikePrice = hasDiscount ? product!.originalPrice : null;
 
-  const availableProducts = products?.filter((p) => !p.isArchived && p.id !== productId) ?? [];
+  const availableProducts = products?.filter((p) => !p.isArchived && p.id !== productId && isNormalStorefrontProduct(p)) ?? [];
   const sameCategory = availableProducts.filter((p) => p.category === product?.category);
   const otherCategory = availableProducts.filter((p) => p.category !== product?.category);
   const recommended = [...sameCategory, ...otherCategory].slice(0, 10);

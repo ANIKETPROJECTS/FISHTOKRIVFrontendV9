@@ -23,6 +23,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { SwipeHint } from "@/components/storefront/SwipeHint";
 import type { Combo, Product } from "@shared/schema";
+import { isNormalStorefrontProduct } from "@shared/productVisibility";
 import { getActiveHubDb } from "@/lib/queryClient";
 import { getDummyDetail } from "@/lib/productDummyData";
 
@@ -432,11 +433,11 @@ export default function ComboDetail() {
   const comboProductIds = new Set((combo?.includes ?? []).map((inc) => inc.productId));
   const comboCategories = new Set(includedProducts.map(({ product }) => product?.category).filter(Boolean));
   const sameCategorySimilar = products.filter(
-    (p) => !p.isArchived && !comboProductIds.has(p.id) && comboCategories.has(p.category)
+    (p) => !p.isArchived && isNormalStorefrontProduct(p) && !comboProductIds.has(p.id) && comboCategories.has(p.category)
   );
   const similarProducts = sameCategorySimilar.length >= 3
     ? sameCategorySimilar.slice(0, 10)
-    : products.filter((p) => !p.isArchived && !comboProductIds.has(p.id)).slice(0, 10);
+    : products.filter((p) => !p.isArchived && isNormalStorefrontProduct(p) && !comboProductIds.has(p.id)).slice(0, 10);
 
   // Build a cart-item representation of this combo (for max-qty calculation)
   const comboCartItem = combo

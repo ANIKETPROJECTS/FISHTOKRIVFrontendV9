@@ -10,6 +10,7 @@ import muttonImg from "@assets/Gemini_Generated_Image_8fq0338fq0338fq0_177271356
 import masalaImg from "@assets/Gemini_Generated_Image_4e60a64e60a64e60_1772713888468.png";
 import menuIcon from "@assets/menu_1774777071510.png";
 import bagIcon from "@/assets/bag-icon.png";
+import { isNormalStorefrontProduct } from "@shared/productVisibility";
 
 function getFallbackImage(category: string) {
   switch (category) {
@@ -53,8 +54,8 @@ export function CategoryMenuDropdown({ open, onClose }: Props) {
   const activeCategoryName = activeCategory ?? "All";
 
   const activeProducts = activeCategoryName === "All"
-    ? allProducts.filter((p) => !p.isArchived && !p.batchExpired)
-    : allProducts.filter((p) => !p.isArchived && !p.batchExpired && p.category === activeCategoryName);
+    ? allProducts.filter((p) => !p.isArchived && !p.batchExpired && isNormalStorefrontProduct(p))
+    : allProducts.filter((p) => !p.isArchived && !p.batchExpired && isNormalStorefrontProduct(p) && p.category === activeCategoryName);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {

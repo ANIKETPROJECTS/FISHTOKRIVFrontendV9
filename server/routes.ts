@@ -3,6 +3,7 @@ import type { Server } from "http";
 import { storage } from "./storage";
 import { api } from "@shared/routes";
 import { z } from "zod";
+import { normalizePreorderMode } from "../shared/productVisibility";
 import passport from "passport";
 import { setupAuth } from "./auth";
 import { connectOrdersDb, generateOrderId, getOrderModel, getPendingCheckoutModel } from "./ordersDb";
@@ -272,6 +273,9 @@ export async function registerRoutes(
       pieces: doc.pieces ?? null, serves: doc.serves ?? null,
       discountPct: doc.discountPct ?? null, quantity: doc.quantity ?? null,
       availableQty, batchExpired,
+      // The external admin has used both spellings over time; normalize them
+      // into the single storefront field while treating missing values as normal.
+      preorderMode: normalizePreorderMode(doc.preorderMode ?? doc.preOrderMode),
       couponIds: (doc.couponIds ?? []).map((id: any) => id.toString()),
       recipes: (doc.recipes ?? []).map((r: any) => ({
         title: r.title ?? "", description: r.description ?? "",

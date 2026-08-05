@@ -32,6 +32,7 @@ const productSchema = new mongoose.Schema({
   serves: { type: String, default: null },
   discountPct: { type: Number, default: null },
   quantity: { type: Number, default: null },
+  preorderMode: { type: String, default: "normal" },
   couponIds: { type: [mongoose.Schema.Types.ObjectId], default: [] },
   inventoryBatches: { type: [inventoryBatchSchema], default: [] },
   recipes: [{

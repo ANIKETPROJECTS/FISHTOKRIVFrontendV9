@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { PreorderMode } from "./productVisibility";
 
 export type User = {
   id: string;
@@ -70,6 +71,7 @@ export type Product = {
   batchExpired: boolean;
   couponIds: string[];
   recipes: Recipe[];
+  preorderMode: PreorderMode;
 };
 
 export type InsertProduct = {
@@ -90,6 +92,7 @@ export type InsertProduct = {
   serves?: string | null;
   quantity?: number | null;
   recipes?: Recipe[];
+  preorderMode?: PreorderMode;
 };
 
 export type UpdateProductRequest = Partial<InsertProduct> & { isArchived?: boolean };
@@ -263,6 +266,7 @@ export const insertProductSchema = z.object({
   pieces: z.string().nullable().optional(),
   serves: z.string().nullable().optional(),
   quantity: z.number().nullable().optional(),
+  preorderMode: z.enum(["normal", "preorder_only", "normal_and_preorder"]).optional(),
   recipes: z.array(z.object({
     title: z.string(),
     description: z.string(),

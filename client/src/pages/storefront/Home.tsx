@@ -16,6 +16,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { CarouselSlide, Category, Section, Combo } from "@shared/schema";
 import noImageImg from "@assets/Gemini_Generated_Image_z60vyrz60vyrz60v_1782896627484.png";
 import { SeoHead } from "@/components/SeoHead";
+import { isNormalStorefrontProduct, isPreorderStorefrontProduct } from "@shared/productVisibility";
 
 function getFallbackImage(_category: string): string {
   return noImageImg;
@@ -102,7 +103,7 @@ export default function Home() {
   };
 
   const filteredProducts = products?.filter((p) => {
-    if (p.isArchived || p.batchExpired) return false;
+    if (p.isArchived || p.batchExpired || !isNormalStorefrontProduct(p)) return false;
     const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
                          p.category.toLowerCase().includes(searchQuery.toLowerCase());
     if (activeCategory === "All") return matchesSearch;
@@ -125,12 +126,16 @@ export default function Home() {
 
   const getSectionProducts = (sectionId: string, unlimited = false) => {
     const filtered = products?.filter(p => {
-      if (p.isArchived || p.batchExpired) return false;
+      if (p.isArchived || p.batchExpired || !isNormalStorefrontProduct(p)) return false;
       if (Array.isArray(p.sectionId)) return p.sectionId.includes(sectionId);
       return p.sectionId === sectionId;
     }) || [];
     return unlimited ? filtered : filtered.slice(0, 10);
   };
+
+  const preorderProducts = (products ?? []).filter(
+    (p) => !p.isArchived && !p.batchExpired && isPreorderStorefrontProduct(p),
+  );
 
   const handleLogoClick = () => {
     setView("home");
@@ -332,6 +337,31 @@ export default function Home() {
           </DragScrollDiv>
           <SwipeHint />
         </div>
+
+        {/* Preorder products are deliberately kept out of normal category
+            sections and get their own customer-facing section. */}
+        {preorderProducts.length > 0 && (
+          <section className="mb-7" data-testid="section-preorder">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="text-xl sm:text-2xl font-medium text-foreground uppercase tracking-wide">
+                  Preorder
+                </h2>
+                <p className="text-xs sm:text-sm text-muted-foreground mt-1">
+                  Reserve these items for a future delivery date
+                </p>
+              </div>
+            </div>
+            <DragScrollDiv className="flex overflow-x-auto gap-4 sm:gap-6 scrollbar-hide">
+              {preorderProducts.map((product) => (
+                <div key={product.id} className="w-[240px] sm:w-[280px] flex-none">
+                  <ProductCard product={product} />
+                </div>
+              ))}
+            </DragScrollDiv>
+            <SwipeHint />
+          </section>
+        )}
 
         {/* Dynamic Sections from DB — products and combos */}
         {sections.map((section) => {

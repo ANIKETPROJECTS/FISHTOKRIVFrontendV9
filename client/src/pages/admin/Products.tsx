@@ -19,6 +19,11 @@ import { Badge } from "@/components/ui/badge";
 const CATEGORIES = ["Fish", "Prawns", "Chicken", "Mutton", "Masalas"];
 const STATUSES = ["available", "limited", "unavailable"];
 const DIFFICULTIES = ["Easy", "Medium", "Hard"];
+const PREORDER_MODES = [
+  { value: "normal", label: "Normal orders only" },
+  { value: "preorder_only", label: "Preorder only" },
+  { value: "normal_and_preorder", label: "Normal + preorder" },
+] as const;
 
 export default function Products() {
   const { data: products } = useProducts();
@@ -333,6 +338,7 @@ function ProductDialog({ open, onOpenChange, product }: { open: boolean, onOpenC
       pieces: product.pieces || '',
       serves: product.serves || '',
       quantity: product.quantity ?? 0,
+      preorderMode: product.preorderMode ?? "normal",
       recipes: product.recipes?.length ? product.recipes.map(r => ({
         title: r.title,
         description: r.description,
@@ -350,6 +356,7 @@ function ProductDialog({ open, onOpenChange, product }: { open: boolean, onOpenC
       unit: 'per kg', imageUrl: '', status: 'available', limitedStockNote: '',
       sectionId: null, description: '', grossWeight: '', netWeight: '', pieces: '', serves: '',
       quantity: 0, recipes: [],
+      preorderMode: "normal",
     }
   });
 
@@ -397,6 +404,20 @@ function ProductDialog({ open, onOpenChange, product }: { open: boolean, onOpenC
               )} />
               <FormField control={form.control} name="status" render={({ field }) => (
                 <FormItem><FormLabel>Status</FormLabel><Select onValueChange={field.onChange} defaultValue={field.value}><FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl><SelectContent>{STATUSES.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent></Select></FormItem>
+              )} />
+              <FormField control={form.control} name="preorderMode" render={({ field }) => (
+                <FormItem className="col-span-2">
+                  <FormLabel>Ordering availability</FormLabel>
+                  <Select onValueChange={field.onChange} value={field.value ?? "normal"}>
+                    <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                    <SelectContent>
+                      {PREORDER_MODES.map((mode) => (
+                        <SelectItem key={mode.value} value={mode.value}>{mode.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
               )} />
 
               <FormField control={form.control} name="originalPrice" render={({ field }) => (
