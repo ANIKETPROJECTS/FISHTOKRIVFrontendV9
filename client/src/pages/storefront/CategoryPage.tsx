@@ -12,7 +12,10 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ChevronLeft } from "lucide-react";
 import type { Category } from "@shared/schema";
-import { isNormalStorefrontProduct } from "@shared/productVisibility";
+import {
+  isNormalStorefrontProduct,
+  isPreorderStorefrontProduct,
+} from "@shared/productVisibility";
 
 import fishImg from "@assets/Gemini_Generated_Image_w6wqkkw6wqkkw6wq_(1)_1772713077919.png";
 import prawnsImg from "@assets/Gemini_Generated_Image_5xy0sd5xy0sd5xy0_1772713090650.png";
@@ -49,6 +52,12 @@ export default function CategoryPage() {
   const categoryProducts = isAll
     ? (products?.filter((p) => !p.isArchived && !p.batchExpired && isNormalStorefrontProduct(p)) || [])
     : (products?.filter((p) => !p.isArchived && !p.batchExpired && isNormalStorefrontProduct(p) && p.category === categoryName) || []);
+
+  // Keep preorder inventory out of the normal category product grid, but
+  // surface it first in its own section for the selected category.
+  const preorderProducts = isAll
+    ? (products?.filter((p) => !p.isArchived && !p.batchExpired && isPreorderStorefrontProduct(p)) || [])
+    : (products?.filter((p) => !p.isArchived && !p.batchExpired && isPreorderStorefrontProduct(p) && p.category === categoryName) || []);
 
   const currentCategory = categories.find((c) => c.name === categoryName);
   const subCategories = currentCategory?.subCategories ?? [];
@@ -132,6 +141,29 @@ export default function CategoryPage() {
             )}
           </div>
         </div>
+
+        {preorderProducts.length > 0 && (
+          <section className="mb-7" data-testid="section-category-preorder">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="text-xl sm:text-2xl font-medium text-foreground uppercase tracking-wide">
+                  Preorder
+                </h2>
+                <p className="text-xs sm:text-sm text-muted-foreground mt-1">
+                  Reserve these items for a future delivery date
+                </p>
+              </div>
+            </div>
+            <DragScrollDiv className="flex overflow-x-auto gap-4 sm:gap-6 scrollbar-hide">
+              {preorderProducts.map((product) => (
+                <div key={product.id} className="w-[240px] sm:w-[280px] flex-none">
+                  <ProductCard product={product} />
+                </div>
+              ))}
+            </DragScrollDiv>
+            <SwipeHint />
+          </section>
+        )}
 
         {/* Sub-category scrollable strip */}
         {!isAll && subsWithProducts.length > 0 && (
