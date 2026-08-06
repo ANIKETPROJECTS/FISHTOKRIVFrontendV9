@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { PreorderMode } from "./productVisibility";
+import { PREORDER_AVAILABILITY_TYPES, type PreorderAvailability } from "./preorderAvailability";
 
 export type User = {
   id: string;
@@ -72,6 +73,7 @@ export type Product = {
   couponIds: string[];
   recipes: Recipe[];
   preorderMode: PreorderMode;
+  preorderAvailability?: PreorderAvailability | null;
 };
 
 export type InsertProduct = {
@@ -93,6 +95,7 @@ export type InsertProduct = {
   quantity?: number | null;
   recipes?: Recipe[];
   preorderMode?: PreorderMode;
+  preorderAvailability?: PreorderAvailability | null;
 };
 
 export type UpdateProductRequest = Partial<InsertProduct> & { isArchived?: boolean };
@@ -267,6 +270,12 @@ export const insertProductSchema = z.object({
   serves: z.string().nullable().optional(),
   quantity: z.number().nullable().optional(),
   preorderMode: z.enum(["normal", "preorder_only", "normal_and_preorder"]).optional(),
+  preorderAvailability: z.object({
+    type: z.enum(PREORDER_AVAILABILITY_TYPES),
+    weekdays: z.array(z.number().int().min(0).max(6)).optional(),
+    startDate: z.string().optional(),
+    endDate: z.string().optional(),
+  }).nullable().optional(),
   recipes: z.array(z.object({
     title: z.string(),
     description: z.string(),
@@ -331,6 +340,7 @@ export const insertOrderRequestSchema = z.object({
   timeslotStart: z.string().nullable().optional(),
   timeslotEnd: z.string().nullable().optional(),
   deliveryDate: z.string().nullable().optional(),
+  orderType: z.enum(["normal", "preorder"]).nullable().optional(),
   instantDeliveryCharge: z.number().nullable().optional(),
   couponCode: z.string().nullable().optional(),
   discountAmount: z.number().nullable().optional(),

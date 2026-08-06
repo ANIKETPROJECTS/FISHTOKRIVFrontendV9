@@ -64,6 +64,7 @@ const orderSchema = new mongoose.Schema(
     paymentMode: { type: String, default: null },
     upiVariant: { type: String, default: null },
     scheduleType: { type: String, default: null },
+    orderType: { type: String, default: null },
     deliveryDate: { type: String, default: null },
     timeslotId: { type: String, default: null },
     timeslotLabel: { type: String, default: null },

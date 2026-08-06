@@ -47,6 +47,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import type { CustomerAddress, Timeslot, Coupon } from "@shared/schema";
+import { isPreorderDateAvailable, normalizePreorderAvailability } from "@shared/preorderAvailability";
 import { format } from "date-fns";
 
 import noImageImg from "@assets/Gemini_Generated_Image_z60vyrz60vyrz60v_1782896627484.png";
@@ -124,6 +125,35 @@ function startOfTomorrow(): Date {
   date.setDate(date.getDate() + 1);
   date.setHours(0, 0, 0, 0);
   return date;
+}
+
+const PREORDER_DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function dateFromKey(dateKey: string): Date {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function formatPreorderAvailability(item: any): string {
+  const rule = normalizePreorderAvailability(item.preorderAvailability);
+  if (rule.type === "all") return "Available on all future dates";
+  if (rule.type === "weekdays") {
+    const days = (rule.weekdays ?? [0, 1, 2, 3, 4, 5, 6])
+      .map((day) => PREORDER_DAY_NAMES[day])
+      .join(", ");
+    return `Available on ${days}`;
+  }
+  if (rule.startDate && rule.endDate && rule.startDate === rule.endDate) {
+    return `Available on ${format(dateFromKey(rule.startDate), "dd MMM yyyy")}`;
+  }
+  if (rule.startDate && rule.endDate) {
+    return `Available from ${format(dateFromKey(rule.startDate), "dd MMM yyyy")} to ${format(dateFromKey(rule.endDate), "dd MMM yyyy")}`;
+  }
+  if (rule.startDate) return `Available from ${format(dateFromKey(rule.startDate), "dd MMM yyyy")}`;
+  if (rule.endDate) return `Available until ${format(dateFromKey(rule.endDate), "dd MMM yyyy")}`;
+  return "Available on all future dates";
 }
 
 export function CartDrawer() {
@@ -366,12 +396,17 @@ export function CartDrawer() {
   ), []);
 
   const getAvailableTimeslotsForDate = useCallback((date: Date, isToday: boolean): Timeslot[] => {
+    const dateKey = getDateKey(date);
+    const tomorrowKey = getDateKey(startOfTomorrow());
     return timeslots.filter((slot) => {
       if (slot.isInstant) return isToday && isSlotActiveOnDay(slot, date) && isSlotAvailable(slot);
       if (!isSlotActiveOnDay(slot, date)) return false;
       if (slot.orderLimit > 0) {
-        const orderCount = isToday ? slot.todaysOrderCount : slot.nextDayOrderCount;
-        if (orderCount >= slot.orderLimit) return false;
+        const orderCount =
+          isToday ? slot.todaysOrderCount :
+          dateKey === tomorrowKey ? slot.nextDayOrderCount :
+          null;
+        if (orderCount !== null && orderCount >= slot.orderLimit) return false;
       }
       if (isToday) {
         const startStr = extractSlotStartTime(slot);
@@ -386,7 +421,36 @@ export function CartDrawer() {
       }
       return true;
     });
-  }, [timeslots, isSlotAvailable, isSlotActiveOnDay, extractSlotStartTime, parseTimeStr]);
+  }, [timeslots, isSlotAvailable, isSlotActiveOnDay, extractSlotStartTime, parseTimeStr, getDateKey]);
+
+  const preorderItems = useMemo(
+    () => items.filter((item) => item.isPreorderCheckout),
+    [items],
+  );
+
+  const isPreorderProductDateAvailable = useCallback((date: Date): boolean => {
+    const dateKey = getDateKey(date);
+    return preorderItems.length > 0 &&
+      preorderItems.every((item) => isPreorderDateAvailable(dateKey, item.preorderAvailability));
+  }, [getDateKey, preorderItems]);
+
+  const isPreorderDateSelectable = useCallback((date: Date): boolean => {
+    if (!isPreorderProductDateAvailable(date)) return false;
+    return getAvailableTimeslotsForDate(date, false).length > 0;
+  }, [getAvailableTimeslotsForDate, isPreorderProductDateAvailable]);
+
+  const firstValidPreorderDate = useMemo(() => {
+    if (!isPreorderCart || preorderItems.length === 0) return startOfTomorrow();
+    const candidate = startOfTomorrow();
+    // Availability ranges are finite or weekday based. Search two years, which
+    // avoids rendering a large set of calendar buttons while still finding the
+    // next valid configured date.
+    for (let index = 0; index < 730; index += 1) {
+      if (isPreorderDateSelectable(candidate)) return new Date(candidate);
+      candidate.setDate(candidate.getDate() + 1);
+    }
+    return null;
+  }, [getAvailableTimeslotsForDate, isPreorderCart, isPreorderDateSelectable, preorderItems.length]);
 
   const availableTimeslots = getAvailableTimeslotsForDate(new Date(), true);
   const nextDayAvailableTimeslots = getAvailableTimeslotsForDate(
@@ -410,13 +474,16 @@ export function CartDrawer() {
 
   useEffect(() => {
     if (!isPreorderCart) return;
-    const todayKey = getDateKey(new Date());
-    if (getDateKey(selectedDeliveryDate) < todayKey) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      setSelectedDeliveryDate(today);
+    if (!firstValidPreorderDate) {
+      setSelectedDeliveryDate(startOfTomorrow());
+      setSelectedTimeslotId(null);
+      return;
     }
-  }, [isPreorderCart, selectedDeliveryDate, getDateKey]);
+    if (!isPreorderDateSelectable(selectedDeliveryDate)) {
+      setSelectedDeliveryDate(firstValidPreorderDate);
+      setSelectedTimeslotId(null);
+    }
+  }, [isPreorderCart, selectedDeliveryDate, firstValidPreorderDate, isPreorderDateSelectable]);
 
   const [showAddForm, setShowAddForm] = useState(false);
   const [addForm, setAddForm] = useState(emptyForm);
@@ -766,6 +833,7 @@ export function CartDrawer() {
       paymentStatus,
       source: "online",
       deliveryType: "delivery",
+      orderType: isPreorderCart ? "preorder" : "normal",
       scheduleType: selectedTimeslot!.isInstant ? "instant" : "slot",
       timeslotId: selectedTimeslot!.id,
       timeslotLabel: slotLabel,
@@ -782,6 +850,26 @@ export function CartDrawer() {
   const placeOrder = async () => {
     const selected = savedAddresses.find(a => a.id === activeAddressId);
     if (!selected) return;
+    if (isPreorderCart) {
+      if (!firstValidPreorderDate) {
+        toast({
+          title: "No common preorder date is available",
+          description: "These products have different preorder availability. Please remove an item or return to the cart.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (!isPreorderDateSelectable(selectedDeliveryDate)) {
+        setSelectedDeliveryDate(firstValidPreorderDate);
+        setSelectedTimeslotId(null);
+        toast({
+          title: "Please choose an available preorder date",
+          description: "The selected date is not available for every item or has no delivery slot.",
+          variant: "destructive",
+        });
+        return;
+      }
+    }
     if (!selectedTimeslot) {
       toast({ title: "Please select a delivery time slot", variant: "destructive" });
       return;
@@ -1140,7 +1228,7 @@ export function CartDrawer() {
                       </div>
                     )}
 
-                    <div className="px-4 pt-4 space-y-3">
+                     <div className="px-4 pt-4 space-y-3">
                       {items.map(item => (
                         <div key={item.id} className="overflow-hidden" data-testid={`cart-item-${item.id}`}>
                           <div className="flex items-center gap-3 p-3">
@@ -1175,6 +1263,11 @@ export function CartDrawer() {
                             <div className="flex-1 min-w-0">
                               <h4 className="font-semibold text-foreground text-sm truncate">{item.name}</h4>
                               <p className="text-xs text-muted-foreground">{item.unit}</p>
+                               {item.isPreorderCheckout && (
+                                 <p className="text-[11px] leading-snug text-[#364F9F] mt-1" data-testid={`availability-${item.id}`}>
+                                   {formatPreorderAvailability(item)}
+                                 </p>
+                               )}
                               <div className="flex items-center gap-2 mt-1">
                                 <span className="text-sm font-bold text-primary">₹{item.price}</span>
                                 {!item.isCombo && item.originalPrice && item.originalPrice > item.price && (
@@ -1760,11 +1853,20 @@ export function CartDrawer() {
                         )}
                       </div>
 
-                       {isPreorderCart ? (
+                         {isPreorderCart ? (
                          <div className="mb-3">
                            <label className="text-xs font-semibold text-muted-foreground block mb-1.5">
-                             Delivery date
+                              Delivery date for all preorder items
                            </label>
+                            <p className="text-[11px] text-muted-foreground mb-1.5">
+                              Choose a date available for every item in your cart.
+                            </p>
+                            {!firstValidPreorderDate && (
+                              <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 mb-2 text-xs text-amber-800" role="alert">
+                                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                                <span>No common preorder date is available for these items.</span>
+                              </div>
+                            )}
                            <Popover open={datePickerOpen} onOpenChange={setDatePickerOpen}>
                              <PopoverTrigger asChild>
                                <Button
@@ -1785,12 +1887,13 @@ export function CartDrawer() {
                                  selected={selectedDeliveryDate}
                                  onSelect={(date) => {
                                    if (!date) return;
+                                    if (!isPreorderDateSelectable(date)) return;
                                    date.setHours(0, 0, 0, 0);
                                    setSelectedDeliveryDate(date);
                                    setSelectedTimeslotId(null);
                                    setDatePickerOpen(false);
                                  }}
-                                 disabled={{ before: startOfTomorrow() }}
+                                  disabled={(date) => !isPreorderDateSelectable(date)}
                                  initialFocus
                                />
                              </PopoverContent>
@@ -1820,9 +1923,11 @@ export function CartDrawer() {
                             <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
                               <Loader2 className="w-4 h-4 animate-spin" /> Loading slots...
                             </div>
-                          ) : displayTimeslots.length === 0 ? (
-                            <div className="py-4 text-center text-sm text-muted-foreground">
-                              No slots available
+                           ) : displayTimeslots.length === 0 ? (
+                             <div className="py-4 text-center text-sm text-muted-foreground">
+                               {isPreorderCart
+                                 ? "No delivery slots available for this date"
+                                 : "No slots available"}
                             </div>
                           ) : (
                             displayTimeslots.map((slot, slotIdx) => {

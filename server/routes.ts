@@ -4,6 +4,7 @@ import { storage } from "./storage";
 import { api } from "@shared/routes";
 import { z } from "zod";
 import { normalizePreorderMode } from "../shared/productVisibility";
+import { isPreorderDateAvailable, normalizePreorderAvailability } from "../shared/preorderAvailability";
 import passport from "passport";
 import { setupAuth } from "./auth";
 import { connectOrdersDb, generateOrderId, getOrderModel, getPendingCheckoutModel } from "./ordersDb";
@@ -276,6 +277,7 @@ export async function registerRoutes(
       // The external admin has used both spellings over time; normalize them
       // into the single storefront field while treating missing values as normal.
       preorderMode: normalizePreorderMode(doc.preorderMode ?? doc.preOrderMode),
+      preorderAvailability: normalizePreorderAvailability(doc.preorderAvailability),
       couponIds: (doc.couponIds ?? []).map((id: any) => id.toString()),
       recipes: (doc.recipes ?? []).map((r: any) => ({
         title: r.title ?? "", description: r.description ?? "",
@@ -744,6 +746,52 @@ export async function registerRoutes(
   app.post(api.orders.create.path, async (req, res) => {
     try {
       const input = api.orders.create.input.parse(req.body);
+
+      // Preorder dates are product eligibility metadata, not a client-trusted
+      // calendar choice. Re-read the current products and validate the one
+      // shared delivery date before any payment or inventory mutation.
+      if (input.orderType === "preorder") {
+        const dateText = input.deliveryDate;
+        if (!dateText || !/^\d{4}-\d{2}-\d{2}$/.test(dateText)) {
+          return res.status(400).json({ message: "Please choose a valid preorder delivery date." });
+        }
+        const parsedDate = new Date(`${dateText}T00:00:00Z`);
+        if (Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== dateText) {
+          return res.status(400).json({ message: "Please choose a valid preorder delivery date." });
+        }
+        const today = new Date();
+        const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+        const tomorrow = new Date(today);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const tomorrowKey = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")}`;
+        if (dateText < tomorrowKey) {
+          return res.status(400).json({ message: "Preorder delivery must be from tomorrow onward." });
+        }
+
+        const hub = input.hubDbName ? await getHubModels(input.hubDbName) : null;
+        if (!hub) return res.status(400).json({ message: "No hub selected for preorder validation." });
+        const productIds = (input.items as any[]).map((item) => item.productId);
+        const products = await hub.Product.find({ _id: { $in: productIds } })
+          .select("_id name preorderMode preOrderMode preorderAvailability")
+          .lean() as any[];
+        const productsById = new Map(products.map((product) => [String(product._id), product]));
+
+        for (const item of input.items as any[]) {
+          const product = productsById.get(String(item.productId));
+          if (!product) {
+            return res.status(400).json({ message: `Product "${item.name}" is no longer available.` });
+          }
+          const mode = normalizePreorderMode(product.preorderMode ?? product.preOrderMode);
+          if (mode === "normal") {
+            return res.status(400).json({ message: `"${product.name}" is not available for preorder.` });
+          }
+          if (!isPreorderDateAvailable(dateText, product.preorderAvailability)) {
+            return res.status(400).json({
+              message: `"${product.name}" is not available on ${dateText}. Please choose another preorder date.`,
+            });
+          }
+        }
+      }
 
       // ── Pre-flight: payment-reference idempotency check ──────────────────────
       // Client-side, two things can race and both call this endpoint for the SAME
@@ -1259,6 +1307,7 @@ export async function registerRoutes(
         couponCodes,
         coupons,
         ...paymentState,
+         orderType: input.orderType ?? null,
         scheduleType: input.scheduleType ?? "slot",
         deliveryDate,
         timeslotId: input.timeslotId ?? null,

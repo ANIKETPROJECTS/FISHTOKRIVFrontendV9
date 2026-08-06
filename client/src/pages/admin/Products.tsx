@@ -15,6 +15,7 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
+import type { PreorderAvailability } from "@shared/preorderAvailability";
 
 const CATEGORIES = ["Fish", "Prawns", "Chicken", "Mutton", "Masalas"];
 const STATUSES = ["available", "limited", "unavailable"];
@@ -24,6 +25,15 @@ const PREORDER_MODES = [
   { value: "preorder_only", label: "Preorder only" },
   { value: "normal_and_preorder", label: "Normal + preorder" },
 ] as const;
+const PREORDER_WEEKDAYS = [
+  { value: 0, label: "Sun" },
+  { value: 1, label: "Mon" },
+  { value: 2, label: "Tue" },
+  { value: 3, label: "Wed" },
+  { value: 4, label: "Thu" },
+  { value: 5, label: "Fri" },
+  { value: 6, label: "Sat" },
+];
 
 export default function Products() {
   const { data: products } = useProducts();
@@ -339,6 +349,7 @@ function ProductDialog({ open, onOpenChange, product }: { open: boolean, onOpenC
       serves: product.serves || '',
       quantity: product.quantity ?? 0,
       preorderMode: product.preorderMode ?? "normal",
+       preorderAvailability: product.preorderAvailability ?? { type: "all", weekdays: [0, 1, 2, 3, 4, 5, 6], startDate: "", endDate: "" },
       recipes: product.recipes?.length ? product.recipes.map(r => ({
         title: r.title,
         description: r.description,
@@ -357,6 +368,7 @@ function ProductDialog({ open, onOpenChange, product }: { open: boolean, onOpenC
       sectionId: null, description: '', grossWeight: '', netWeight: '', pieces: '', serves: '',
       quantity: 0, recipes: [],
       preorderMode: "normal",
+       preorderAvailability: { type: "all", weekdays: [0, 1, 2, 3, 4, 5, 6], startDate: "", endDate: "" },
     }
   });
 
@@ -419,6 +431,12 @@ function ProductDialog({ open, onOpenChange, product }: { open: boolean, onOpenC
                   <FormMessage />
                 </FormItem>
               )} />
+              {(form.watch("preorderMode") === "preorder_only" || form.watch("preorderMode") === "normal_and_preorder") && (
+                <PreorderAvailabilityEditor
+                  value={(form.watch("preorderAvailability") ?? { type: "all", weekdays: [0, 1, 2, 3, 4, 5, 6], startDate: "", endDate: "" }) as PreorderAvailability}
+                  onChange={(value) => form.setValue("preorderAvailability", value, { shouldDirty: true })}
+                />
+              )}
 
               <FormField control={form.control} name="originalPrice" render={({ field }) => (
                 <FormItem>
@@ -513,6 +531,100 @@ function ProductDialog({ open, onOpenChange, product }: { open: boolean, onOpenC
         </Form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function PreorderAvailabilityEditor({
+  value,
+  onChange,
+}: {
+  value: PreorderAvailability;
+  onChange: (value: PreorderAvailability) => void;
+}) {
+  const type = value.type ?? "all";
+  const weekdays = value.weekdays ?? [0, 1, 2, 3, 4, 5, 6];
+
+  const setType = (nextType: PreorderAvailability["type"]) => {
+    onChange({
+      ...value,
+      type: nextType,
+      weekdays: nextType === "weekdays" ? weekdays : value.weekdays,
+    });
+  };
+
+  const toggleWeekday = (day: number) => {
+    const next = weekdays.includes(day)
+      ? weekdays.filter((item) => item !== day)
+      : [...weekdays, day].sort((a, b) => a - b);
+    onChange({ ...value, type: "weekdays", weekdays: next });
+  };
+
+  return (
+    <div className="col-span-2 rounded-xl border border-blue-100 bg-blue-50/50 p-3 space-y-3">
+      <div>
+        <p className="text-sm font-semibold text-foreground">Preorder availability</p>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          Customers will only be able to choose dates allowed by this schedule.
+        </p>
+      </div>
+
+      <Select value={type} onValueChange={(next) => setType(next as PreorderAvailability["type"])}>
+        <SelectTrigger className="bg-white">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="all">All future dates</SelectItem>
+          <SelectItem value="weekdays">Selected weekdays</SelectItem>
+          <SelectItem value="date_range">Specific date or date range</SelectItem>
+        </SelectContent>
+      </Select>
+
+      {type === "weekdays" && (
+        <div className="flex flex-wrap gap-2">
+          {PREORDER_WEEKDAYS.map((day) => {
+            const selected = weekdays.includes(day.value);
+            return (
+              <button
+                key={day.value}
+                type="button"
+                onClick={() => toggleWeekday(day.value)}
+                aria-pressed={selected}
+                className={`min-w-10 rounded-full border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+                  selected
+                    ? "border-[#364F9F] bg-[#364F9F] text-white"
+                    : "border-border/60 bg-white text-muted-foreground"
+                }`}
+              >
+                {day.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {type === "date_range" && (
+        <div className="grid grid-cols-2 gap-3">
+          <label className="space-y-1">
+            <span className="text-xs font-medium text-muted-foreground">Start date</span>
+            <Input
+              type="date"
+              value={value.startDate ?? ""}
+              onChange={(event) => onChange({ ...value, startDate: event.target.value })}
+              className="bg-white"
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-medium text-muted-foreground">End date</span>
+            <Input
+              type="date"
+              value={value.endDate ?? ""}
+              onChange={(event) => onChange({ ...value, endDate: event.target.value })}
+              className="bg-white"
+            />
+          </label>
+        </div>
+      )}
+    </div>
   );
 }
 

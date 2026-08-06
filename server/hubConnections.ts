@@ -33,6 +33,16 @@ const productSchema = new mongoose.Schema({
   discountPct: { type: Number, default: null },
   quantity: { type: Number, default: null },
   preorderMode: { type: String, default: "normal" },
+  preorderAvailability: {
+    type: {
+      type: String,
+      enum: ["all", "weekdays", "date_range"],
+      default: "all",
+    },
+    weekdays: { type: [Number], default: [0, 1, 2, 3, 4, 5, 6] },
+    startDate: { type: String, default: "" },
+    endDate: { type: String, default: "" },
+  },
   couponIds: { type: [mongoose.Schema.Types.ObjectId], default: [] },
   inventoryBatches: { type: [inventoryBatchSchema], default: [] },
   recipes: [{
