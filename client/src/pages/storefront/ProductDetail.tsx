@@ -1,4 +1,4 @@
-import { useRoute, useLocation } from "wouter";
+import { useRoute, useLocation, useSearch } from "wouter";
 import { useProducts } from "@/hooks/use-products";
 import { useProductCoupons } from "@/hooks/use-coupons";
 import { useCart } from "@/context/CartContext";
@@ -137,6 +137,7 @@ export default function ProductDetail() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const { data: products, isLoading } = useProducts();
+  const search = useSearch();
   const { addToCart, updateQuantity, appliedCoupon, setAppliedCoupon, items: cartItems } = useCart();
   const { customer, openLoginModal } = useCustomer();
   const [qty, setQty] = useState(1);
@@ -464,7 +465,16 @@ export default function ProductDetail() {
                     onClick={() => {
                       if (!customer) { openLoginModal(); return; }
                       if (!isInCart) {
-                        addToCart(product, qty, true);
+                         addToCart(
+                           {
+                             ...product,
+                             isPreorderCheckout:
+                               new URLSearchParams(search).get("preorder") === "1" ||
+                               product.preorderMode === "preorder_only",
+                           } as any,
+                           qty,
+                           true,
+                         );
                       }
                     }}
                     disabled={isUnavailable || totalMax <= 0 || (isInCart && false)}

@@ -14,7 +14,7 @@ const DUMMY_DETAILS: Record<string, { pieces: string; serves: string }> = {
   Masalas: { pieces: "1 Pack", serves: "Serves 6" },
 };
 
-export function ProductCard({ product }: { product: Product }) {
+export function ProductCard({ product, preorderContext = false }: { product: Product; preorderContext?: boolean }) {
   const { addToCart, removeFromCart, updateQuantity, items, computeMaxQty } = useCart();
   const [, setLocation] = useLocation();
   const isUnavailable = product.status === "unavailable";
@@ -35,12 +35,12 @@ export function ProductCard({ product }: { product: Product }) {
 
   const handleAdd = (e: React.MouseEvent) => {
     e.stopPropagation();
-    addToCart(product);
+    addToCart({ ...product, isPreorderCheckout: preorderContext } as any);
   };
 
   const handleIncrease = (e: React.MouseEvent) => {
     e.stopPropagation();
-    addToCart(product);
+    addToCart({ ...product, isPreorderCheckout: preorderContext } as any);
   };
 
   const handleDecrease = (e: React.MouseEvent) => {
@@ -55,7 +55,7 @@ export function ProductCard({ product }: { product: Product }) {
   return (
     <div
       className="group relative bg-card flex flex-col h-full transition-all duration-300 cursor-pointer"
-      onClick={() => setLocation(`/product/${product.id}`)}
+      onClick={() => setLocation(`/product/${product.id}${preorderContext ? "?preorder=1" : ""}`)}
     >
       <div className="relative aspect-square w-full bg-muted/30 overflow-hidden mb-3 border border-border/20 rounded-xl">
         <img

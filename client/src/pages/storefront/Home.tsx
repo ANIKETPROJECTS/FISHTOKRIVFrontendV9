@@ -355,7 +355,7 @@ export default function Home() {
             <DragScrollDiv className="flex overflow-x-auto gap-4 sm:gap-6 scrollbar-hide">
               {preorderProducts.map((product) => (
                 <div key={product.id} className="w-[240px] sm:w-[280px] flex-none">
-                  <ProductCard product={product} />
+                  <ProductCard product={product} preorderContext />
                 </div>
               ))}
             </DragScrollDiv>

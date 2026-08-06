@@ -36,6 +36,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Calendar } from "@/components/ui/calendar";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -45,6 +47,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import type { CustomerAddress, Timeslot, Coupon } from "@shared/schema";
+import { format } from "date-fns";
 
 import noImageImg from "@assets/Gemini_Generated_Image_z60vyrz60vyrz60v_1782896627484.png";
 import scooterImg from "@assets/animation-original_(51)_1779950354153.png";
@@ -116,6 +119,13 @@ function photonSubtitle(f: PhotonFeature): string {
   return parts.slice(0, 3).join(", ");
 }
 
+function startOfTomorrow(): Date {
+  const date = new Date();
+  date.setDate(date.getDate() + 1);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
 export function CartDrawer() {
   const { isCartOpen, setIsCartOpen, items, updateQuantity, updateInstruction, totalPrice, clearCart, appliedCoupon, setAppliedCoupon, discountAmount, computeMaxQty } = useCart();
   const { mutate: createOrder, isPending } = useCreateOrder();
@@ -156,6 +166,8 @@ export function CartDrawer() {
   const [couponExpanded, setCouponExpanded] = useState(false);
   const [timeslotExpanded, setTimeslotExpanded] = useState(false);
   const [isNextDay, setIsNextDay] = useState(false);
+  const [selectedDeliveryDate, setSelectedDeliveryDate] = useState<Date>(startOfTomorrow);
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
   const [isApplyingCoupon, setIsApplyingCoupon] = useState(false);
   const [applyingCouponId, setApplyingCouponId] = useState<string | null>(null);
 
@@ -347,22 +359,64 @@ export function CartDrawer() {
     return true;
   }, [parseTimeStr, extractSlotStartTime, isSlotActiveOnDay]);
 
-  const availableTimeslots = timeslots.filter(isSlotAvailable);
-  const nextDayAvailableTimeslots = timeslots.filter(t => {
-    if (t.isInstant) return false;
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    if (!isSlotActiveOnDay(t, tomorrow)) return false;
-    return t.orderLimit <= 0 || t.nextDayOrderCount < t.orderLimit;
-  });
-  const displayTimeslots = isNextDay ? nextDayAvailableTimeslots : availableTimeslots;
-  const selectedTimeslot = (isNextDay ? nextDayAvailableTimeslots : availableTimeslots).find(t => t.id === selectedTimeslotId) ?? null;
+  const isPreorderCart = items.some((item) => item.isPreorderCheckout);
+
+  const getDateKey = useCallback((date: Date): string => (
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`
+  ), []);
+
+  const getAvailableTimeslotsForDate = useCallback((date: Date, isToday: boolean): Timeslot[] => {
+    return timeslots.filter((slot) => {
+      if (slot.isInstant) return isToday && isSlotActiveOnDay(slot, date) && isSlotAvailable(slot);
+      if (!isSlotActiveOnDay(slot, date)) return false;
+      if (slot.orderLimit > 0) {
+        const orderCount = isToday ? slot.todaysOrderCount : slot.nextDayOrderCount;
+        if (orderCount >= slot.orderLimit) return false;
+      }
+      if (isToday) {
+        const startStr = extractSlotStartTime(slot);
+        if (startStr) {
+          const startTime = parseTimeStr(startStr);
+          if (startTime) {
+            const now = new Date();
+            const cutoff = new Date(startTime.getTime() - 30 * 60 * 1000);
+            if (now >= cutoff) return false;
+          }
+        }
+      }
+      return true;
+    });
+  }, [timeslots, isSlotAvailable, isSlotActiveOnDay, extractSlotStartTime, parseTimeStr]);
+
+  const availableTimeslots = getAvailableTimeslotsForDate(new Date(), true);
+  const nextDayAvailableTimeslots = getAvailableTimeslotsForDate(
+    new Date(new Date().setDate(new Date().getDate() + 1)),
+    false,
+  );
+  const preorderAvailableTimeslots = getAvailableTimeslotsForDate(
+    selectedDeliveryDate,
+    getDateKey(selectedDeliveryDate) === getDateKey(new Date()),
+  );
+  const displayTimeslots = isPreorderCart
+    ? preorderAvailableTimeslots
+    : (isNextDay ? nextDayAvailableTimeslots : availableTimeslots);
+  const selectedTimeslot = displayTimeslots.find(t => t.id === selectedTimeslotId) ?? null;
 
   useEffect(() => {
     if (selectedTimeslotId && !displayTimeslots.find(t => t.id === selectedTimeslotId)) {
       setSelectedTimeslotId(null);
     }
-  }, [isNextDay, availableTimeslots, selectedTimeslotId]);
+  }, [displayTimeslots, selectedTimeslotId]);
+
+  useEffect(() => {
+    if (!isPreorderCart) return;
+    const todayKey = getDateKey(new Date());
+    if (getDateKey(selectedDeliveryDate) < todayKey) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      setSelectedDeliveryDate(today);
+    }
+  }, [isPreorderCart, selectedDeliveryDate, getDateKey]);
 
   const [showAddForm, setShowAddForm] = useState(false);
   const [addForm, setAddForm] = useState(emptyForm);
@@ -654,9 +708,12 @@ export function CartDrawer() {
     const instantCharge = selectedTimeslot!.isInstant ? (selectedTimeslot!.extraCharge ?? 0) : 0;
     const slotCharge = pincodeDeliveryCharge + instantCharge;
     const subtotal = totalPrice;
-    const today = new Date();
-    const orderDate = isNextDay ? new Date(today.getTime() + 24 * 60 * 60 * 1000) : today;
-    const deliveryDate = `${orderDate.getFullYear()}-${String(orderDate.getMonth() + 1).padStart(2, "0")}-${String(orderDate.getDate()).padStart(2, "0")}`;
+    const orderDate = isPreorderCart
+      ? selectedDeliveryDate
+      : isNextDay
+        ? new Date(new Date().getTime() + 24 * 60 * 60 * 1000)
+        : new Date();
+    const deliveryDate = getDateKey(orderDate);
 
     const cashMode = paymentMethod === "online" ? "upi" : "cash";
     const paidAt = new Date().toISOString();
@@ -1703,23 +1760,60 @@ export function CartDrawer() {
                         )}
                       </div>
 
-                      {/* Today / Next Day toggle */}
-                      <div className="flex items-center gap-2 mb-3">
-                        <button
-                          type="button"
-                          onClick={() => { setIsNextDay(false); setSelectedTimeslotId(null); }}
-                          className={`flex-1 py-1.5 rounded-full text-xs font-semibold border-2 transition-all ${!isNextDay ? "border-[#364F9F] bg-[#364F9F] text-white" : "border-border/40 text-muted-foreground bg-white"}`}
-                        >
-                          Today
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => { setIsNextDay(true); setSelectedTimeslotId(null); }}
-                          className={`flex-1 py-1.5 rounded-full text-xs font-semibold border-2 transition-all ${isNextDay ? "border-[#364F9F] bg-[#364F9F] text-white" : "border-border/40 text-muted-foreground bg-white"}`}
-                        >
-                          Next Day
-                        </button>
-                      </div>
+                       {isPreorderCart ? (
+                         <div className="mb-3">
+                           <label className="text-xs font-semibold text-muted-foreground block mb-1.5">
+                             Delivery date
+                           </label>
+                           <Popover open={datePickerOpen} onOpenChange={setDatePickerOpen}>
+                             <PopoverTrigger asChild>
+                               <Button
+                                 type="button"
+                                 variant="outline"
+                                 className="w-full justify-between rounded-xl border-2 border-border/40 bg-white font-semibold text-sm"
+                                 data-testid="preorder-delivery-date"
+                               >
+                                 <span>{format(selectedDeliveryDate, "dd-MM-yyyy")}</span>
+                                 <span className="text-xs text-muted-foreground">
+                                   {format(selectedDeliveryDate, "EEE, dd MMM")}
+                                 </span>
+                               </Button>
+                             </PopoverTrigger>
+                             <PopoverContent align="start" className="w-auto p-0">
+                               <Calendar
+                                 mode="single"
+                                 selected={selectedDeliveryDate}
+                                 onSelect={(date) => {
+                                   if (!date) return;
+                                   date.setHours(0, 0, 0, 0);
+                                   setSelectedDeliveryDate(date);
+                                   setSelectedTimeslotId(null);
+                                   setDatePickerOpen(false);
+                                 }}
+                                 disabled={{ before: startOfTomorrow() }}
+                                 initialFocus
+                               />
+                             </PopoverContent>
+                           </Popover>
+                         </div>
+                       ) : (
+                         <div className="flex items-center gap-2 mb-3">
+                           <button
+                             type="button"
+                             onClick={() => { setIsNextDay(false); setSelectedTimeslotId(null); }}
+                             className={`flex-1 py-1.5 rounded-full text-xs font-semibold border-2 transition-all ${!isNextDay ? "border-[#364F9F] bg-[#364F9F] text-white" : "border-border/40 text-muted-foreground bg-white"}`}
+                           >
+                             Today
+                           </button>
+                           <button
+                             type="button"
+                             onClick={() => { setIsNextDay(true); setSelectedTimeslotId(null); }}
+                             className={`flex-1 py-1.5 rounded-full text-xs font-semibold border-2 transition-all ${isNextDay ? "border-[#364F9F] bg-[#364F9F] text-white" : "border-border/40 text-muted-foreground bg-white"}`}
+                           >
+                             Next Day
+                           </button>
+                         </div>
+                       )}
 
                       <div className="space-y-2">
                           {timeslotsLoading ? (

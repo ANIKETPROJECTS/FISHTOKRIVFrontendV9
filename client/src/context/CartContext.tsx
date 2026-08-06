@@ -14,6 +14,8 @@ export interface CartItem extends Omit<Product, 'id'> {
   id: number;
   quantity: number;
   instruction?: string;
+  /** True when this item was added from the dedicated preorder storefront area. */
+  isPreorderCheckout?: boolean;
   isCombo?: boolean;
   originalId?: string;
   comboImages?: string[];
@@ -129,16 +131,37 @@ export function CartProvider({ children }: { children: ReactNode }) {
 
     let blocked = false;
     let blockMsg = "";
+    let modeSwitchMessage = "";
 
     setItems((current) => {
       const isCombo = (product as CartItem).isCombo === true;
-      const existing = current.find((i) => i.id === product.id);
+      const isPreorderProduct =
+        (product as CartItem).isPreorderCheckout === true ||
+        product.preorderMode === "preorder_only";
+
+      // A cart can only contain one checkout mode. Preorder orders use a
+      // calendar date, while normal orders use the regular delivery flow, so
+      // never mix the two kinds of products in one cart.
+      const oppositeModeItems = current.filter(
+        (item) => Boolean(item.isPreorderCheckout) !== isPreorderProduct,
+      );
+      const modeItems = oppositeModeItems.length > 0
+        ? current.filter((item) => Boolean(item.isPreorderCheckout) === isPreorderProduct)
+        : current;
+
+      if (oppositeModeItems.length > 0) {
+        modeSwitchMessage = isPreorderProduct
+          ? "Normal products were removed because preorder items use a separate delivery date."
+          : "Preorder products were removed because normal items use the regular delivery flow.";
+      }
+
+      const existing = modeItems.find((i) => i.id === product.id);
 
       if (isCombo) {
         const ci = product as CartItem;
         if (ci.comboIncludes && ci.comboIncludes.length > 0) {
           const currentComboQty = existing ? existing.quantity : 0;
-          const maxTotal = calcMaxQty(ci, current);
+          const maxTotal = calcMaxQty(ci, modeItems);
           if (currentComboQty + quantity > maxTotal) {
             blocked = true;
             const canAdd = Math.max(0, maxTotal - currentComboQty);
@@ -153,7 +176,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
         const availableQty = (product as any).availableQty ?? null;
         if (availableQty !== null) {
           const asCartItem = { ...product, quantity: existing ? existing.quantity : 0 } as CartItem;
-          const maxTotal = calcMaxQty(asCartItem, current);
+          const maxTotal = calcMaxQty(asCartItem, modeItems);
           const currentQty = existing ? existing.quantity : 0;
           if (currentQty + quantity > maxTotal) {
             blocked = true;
@@ -168,11 +191,30 @@ export function CartProvider({ children }: { children: ReactNode }) {
       }
 
       if (existing) {
-        return current.map((i) =>
-          i.id === product.id ? { ...i, quantity: i.quantity + quantity } : i
+        return modeItems.map((i) =>
+          i.id === product.id
+            ? {
+                ...i,
+                quantity: i.quantity + quantity,
+                // If the same product is added from the preorder section later,
+                // keep the cart in preorder checkout mode for that item.
+                isPreorderCheckout:
+                  i.isPreorderCheckout ||
+                  (product as CartItem).isPreorderCheckout ||
+                  product.preorderMode === "preorder_only",
+              }
+            : i
         );
       }
-      return [...current, { ...product, quantity }];
+      return [
+        ...modeItems,
+        {
+          ...product,
+          quantity,
+          isPreorderCheckout:
+            isPreorderProduct,
+        },
+      ];
     });
 
     if (blocked) {
@@ -183,6 +225,14 @@ export function CartProvider({ children }: { children: ReactNode }) {
         duration: 2500,
       });
       return;
+    }
+    if (modeSwitchMessage) {
+      setAppliedCoupon(null);
+      toast({
+        title: "Cart updated",
+        description: modeSwitchMessage,
+        duration: 3500,
+      });
     }
     toast({
       title: "Fresh catch added to your Tokri!",

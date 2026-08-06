@@ -814,6 +814,57 @@ export async function registerRoutes(
         }
       }
 
+      // Validate the selected slot against the requested calendar date on the
+      // server as well as in the checkout UI. This prevents a stale tab or a
+      // handcrafted request from ordering on a weekday that the admin disabled.
+      if (input.timeslotId && input.hubDbName && input.scheduleType !== "instant") {
+        try {
+          const hub = await getHubModels(input.hubDbName);
+          const timeslot = await hub.Timeslot.findById(input.timeslotId).lean() as any;
+          if (!timeslot || timeslot.isActive === false) {
+            return res.status(400).json({ message: "This delivery time slot is no longer available." });
+          }
+
+          const dateText = input.deliveryDate;
+          const deliveryDate = dateText ? new Date(`${dateText}T00:00:00`) : new Date();
+          if (Number.isNaN(deliveryDate.getTime())) {
+            return res.status(400).json({ message: "Please choose a valid delivery date." });
+          }
+          deliveryDate.setHours(0, 0, 0, 0);
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          if (deliveryDate < today) {
+            return res.status(400).json({ message: "Delivery date cannot be in the past." });
+          }
+
+          const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+          const dayName = dayNames[deliveryDate.getDay()];
+          const dayConfig = (timeslot.activeDays ?? []).find(
+            (entry: any) => String(entry.day).toLowerCase() === dayName,
+          );
+          if (dayConfig?.status === "off") {
+            return res.status(400).json({ message: "This time slot is disabled for the selected date." });
+          }
+
+          // The current hub schema tracks capacity for today and next day.
+          // Future dates are still governed by activeDays, but do not consume
+          // either rolling count because that would affect the wrong date.
+          const tomorrow = new Date(today);
+          tomorrow.setDate(tomorrow.getDate() + 1);
+          if (timeslot.orderLimit > 0 && deliveryDate.getTime() === today.getTime() &&
+              (timeslot.todaysOrderCount ?? 0) >= timeslot.orderLimit) {
+            return res.status(400).json({ message: "This time slot is full for today." });
+          }
+          if (timeslot.orderLimit > 0 && deliveryDate.getTime() === tomorrow.getTime() &&
+              (timeslot.nextDayOrderCount ?? 0) >= timeslot.orderLimit) {
+            return res.status(400).json({ message: "This time slot is full for the selected date." });
+          }
+        } catch (timeslotValidationErr) {
+          console.error("[Timeslot] Validation error:", timeslotValidationErr);
+          return res.status(400).json({ message: "Could not validate the selected delivery slot." });
+        }
+      }
+
       // ── Pre-flight: coupon usage check (runs BEFORE inventory is touched) ───
       if (input.hubDbName && input.couponCode) {
         try {
@@ -1280,18 +1331,27 @@ export async function registerRoutes(
         }
       }
 
-      // Increment timeslot order count (today vs next-day) — match by startTime
+      // Increment the rolling today/next-day count only for those dates. The
+      // schema has no per-calendar-date count field for later preorder dates.
       if (input.timeslotStart && input.hubDbName && input.scheduleType !== "instant") {
         try {
           const hub = await getHubModels(input.hubDbName);
           const today = new Date();
           const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-          const countField = (input.deliveryDate && input.deliveryDate !== todayStr) ? "nextDayOrderCount" : "todaysOrderCount";
-          await hub.Timeslot.findOneAndUpdate(
-            { startTime: input.timeslotStart },
-            { $inc: { [countField]: 1 } },
-            { strict: false }
-          );
+          const tomorrow = new Date(today);
+          tomorrow.setDate(tomorrow.getDate() + 1);
+          const tomorrowStr = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")}`;
+          const countField =
+            input.deliveryDate === todayStr ? "todaysOrderCount" :
+            input.deliveryDate === tomorrowStr ? "nextDayOrderCount" :
+            null;
+          if (countField) {
+            await hub.Timeslot.findOneAndUpdate(
+              { startTime: input.timeslotStart },
+              { $inc: { [countField]: 1 } },
+              { strict: false }
+            );
+          }
         } catch (timeslotCountErr) {
           console.error("[Timeslot] Count increment error:", timeslotCountErr);
         }

@@ -7,3 +7,4 @@
 - [Razorpay webhook safety net](razorpay-webhook.md) — POST /api/webhooks/razorpay creates missed orders; needs RAZORPAY_WEBHOOK_SECRET env var; pending checkouts stored in MongoDB orders DB (TTL 24h).
 - [TypeScript check heap limit](typescript-check-heap.md) — repository-wide tsc can exhaust Node memory here; use the production build as compile verification.
 - [Environment precedence](env-precedence.md) — keep ecosystem defaults intact; runtime Replit Secrets override them in the launcher.
+- [Preorder date-specific slots](preorder-date-slots.md) — preorder checkout selects a future date and filters slots by configured active weekdays.
