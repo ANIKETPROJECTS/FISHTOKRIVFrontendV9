@@ -4,7 +4,7 @@ import { storage } from "./storage";
 import { api } from "@shared/routes";
 import { z } from "zod";
 import { normalizePreorderMode } from "../shared/productVisibility";
-import { isPreorderDateAvailable, normalizePreorderAvailability } from "../shared/preorderAvailability";
+import { isPreorderDateAvailable, isPreorderDateAvailableForAll, normalizePreorderAvailability } from "../shared/preorderAvailability";
 import passport from "passport";
 import { setupAuth } from "./auth";
 import { connectOrdersDb, generateOrderId, getOrderModel, getPendingCheckoutModel } from "./ordersDb";
@@ -776,7 +776,25 @@ export async function registerRoutes(
           .lean() as any[];
         const productsById = new Map(products.map((product) => [String(product._id), product]));
 
-        for (const item of input.items as any[]) {
+          const unavailableProductNames = (input.items as any[])
+            .map((item) => productsById.get(String(item.productId)))
+            .filter((product): product is any => !!product)
+            .filter((product) => !isPreorderDateAvailable(dateText, product.preorderAvailability))
+            .map((product) => product.name);
+
+          if (!isPreorderDateAvailableForAll(
+            dateText,
+            products.map((product) => product.preorderAvailability),
+          )) {
+            const unavailableName = unavailableProductNames[0];
+            return res.status(400).json({
+              message: unavailableName
+                ? `"${unavailableName}" is not available on ${dateText}. Please choose another preorder date.`
+                : "Some preorder products are not available on the selected date. Please choose another preorder date.",
+            });
+          }
+
+          for (const item of input.items as any[]) {
           const product = productsById.get(String(item.productId));
           if (!product) {
             return res.status(400).json({ message: `Product "${item.name}" is no longer available.` });
@@ -784,11 +802,6 @@ export async function registerRoutes(
           const mode = normalizePreorderMode(product.preorderMode ?? product.preOrderMode);
           if (mode === "normal") {
             return res.status(400).json({ message: `"${product.name}" is not available for preorder.` });
-          }
-          if (!isPreorderDateAvailable(dateText, product.preorderAvailability)) {
-            return res.status(400).json({
-              message: `"${product.name}" is not available on ${dateText}. Please choose another preorder date.`,
-            });
           }
         }
       }

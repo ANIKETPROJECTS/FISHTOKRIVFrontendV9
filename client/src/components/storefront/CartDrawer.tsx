@@ -48,7 +48,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import type { CustomerAddress, Timeslot, Coupon } from "@shared/schema";
-import { isPreorderDateAvailable, normalizePreorderAvailability } from "@shared/preorderAvailability";
+import { isPreorderDateAvailableForAll, normalizePreorderAvailability } from "@shared/preorderAvailability";
 import { format } from "date-fns";
 
 import noImageImg from "@assets/Gemini_Generated_Image_z60vyrz60vyrz60v_1782896627484.png";
@@ -448,8 +448,10 @@ export function CartDrawer() {
 
   const isPreorderProductDateAvailable = useCallback((date: Date): boolean => {
     const dateKey = getDateKey(date);
-    return preorderItems.length > 0 &&
-      preorderItems.every((item) => isPreorderDateAvailable(dateKey, item.preorderAvailability));
+    return isPreorderDateAvailableForAll(
+      dateKey,
+      preorderItems.map((item) => item.preorderAvailability),
+    );
   }, [getDateKey, preorderItems]);
 
   const isPreorderDateSelectable = useCallback((date: Date): boolean => {

@@ -74,3 +74,15 @@ export function isPreorderDateAvailable(
   const weekday = new Date(`${dateKey}T00:00:00Z`).getUTCDay();
   return (rule.weekdays ?? ALL_WEEKDAYS).includes(weekday);
 }
+
+/**
+ * A preorder cart has one shared delivery date. Therefore a date is eligible
+ * only when every product in the cart allows that date.
+ */
+export function isPreorderDateAvailableForAll(
+  dateKey: string,
+  availabilities: unknown[],
+): boolean {
+  return availabilities.length > 0
+    && availabilities.every((availability) => isPreorderDateAvailable(dateKey, availability));
+}
