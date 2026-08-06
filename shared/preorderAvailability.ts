@@ -51,5 +51,11 @@ export function isPreorderDateAvailable(
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return false;
   if (rule.startDate && dateKey < rule.startDate) return false;
   if (rule.endDate && dateKey > rule.endDate) return false;
-  return Boolean(rule.startDate || rule.endDate);
+  if (!rule.startDate && !rule.endDate) return false;
+
+  // The admin editor can constrain a date range to selected weekdays.
+  // Both conditions must match: the date must be inside the inclusive range
+  // and its weekday must be one of the selected days.
+  const weekday = new Date(`${dateKey}T00:00:00Z`).getUTCDay();
+  return (rule.weekdays ?? ALL_WEEKDAYS).includes(weekday);
 }

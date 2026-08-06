@@ -556,7 +556,7 @@ function PreorderAvailabilityEditor({
     const next = weekdays.includes(day)
       ? weekdays.filter((item) => item !== day)
       : [...weekdays, day].sort((a, b) => a - b);
-    onChange({ ...value, type: "weekdays", weekdays: next });
+    onChange({ ...value, weekdays: next });
   };
 
   return (
@@ -575,11 +575,17 @@ function PreorderAvailabilityEditor({
         <SelectContent>
           <SelectItem value="all">All future dates</SelectItem>
           <SelectItem value="weekdays">Selected weekdays</SelectItem>
-          <SelectItem value="date_range">Specific date or date range</SelectItem>
+          <SelectItem value="date_range">Date range + selected weekdays</SelectItem>
         </SelectContent>
       </Select>
 
-      {type === "weekdays" && (
+      {(type === "weekdays" || type === "date_range") && (
+        <div>
+          {type === "date_range" && (
+            <p className="text-xs font-medium text-muted-foreground mb-2">
+              Available on these weekdays within the date range
+            </p>
+          )}
         <div className="flex flex-wrap gap-2">
           {PREORDER_WEEKDAYS.map((day) => {
             const selected = weekdays.includes(day.value);
@@ -599,6 +605,7 @@ function PreorderAvailabilityEditor({
               </button>
             );
           })}
+        </div>
         </div>
       )}
 

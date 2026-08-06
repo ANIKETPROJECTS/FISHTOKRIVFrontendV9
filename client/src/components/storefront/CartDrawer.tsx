@@ -146,14 +146,21 @@ function formatPreorderAvailability(item: any): string {
       .join(", ");
     return `Available on ${days}`;
   }
+  const days = (rule.weekdays ?? [0, 1, 2, 3, 4, 5, 6])
+    .filter((day) => day >= 0 && day <= 6)
+    .map((day) => PREORDER_DAY_NAMES[day])
+    .join(", ");
+  const weekdaySuffix = days && days !== "Sun, Mon, Tue, Wed, Thu, Fri, Sat"
+    ? ` on ${days}`
+    : "";
   if (rule.startDate && rule.endDate && rule.startDate === rule.endDate) {
-    return `Available on ${format(dateFromKey(rule.startDate), "dd MMM yyyy")}`;
+    return `Available on ${format(dateFromKey(rule.startDate), "dd MMM yyyy")}${weekdaySuffix}`;
   }
   if (rule.startDate && rule.endDate) {
-    return `Available from ${format(dateFromKey(rule.startDate), "dd MMM yyyy")} to ${format(dateFromKey(rule.endDate), "dd MMM yyyy")}`;
+    return `Available from ${format(dateFromKey(rule.startDate), "dd MMM yyyy")} to ${format(dateFromKey(rule.endDate), "dd MMM yyyy")}${weekdaySuffix}`;
   }
-  if (rule.startDate) return `Available from ${format(dateFromKey(rule.startDate), "dd MMM yyyy")}`;
-  if (rule.endDate) return `Available until ${format(dateFromKey(rule.endDate), "dd MMM yyyy")}`;
+  if (rule.startDate) return `Available from ${format(dateFromKey(rule.startDate), "dd MMM yyyy")}${weekdaySuffix}`;
+  if (rule.endDate) return `Available until ${format(dateFromKey(rule.endDate), "dd MMM yyyy")}${weekdaySuffix}`;
   return "Available on all future dates";
 }
 
