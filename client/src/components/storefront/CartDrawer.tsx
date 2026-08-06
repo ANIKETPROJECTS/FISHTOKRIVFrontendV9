@@ -27,6 +27,7 @@ import giftCardIconImg from "@/assets/gift-card.png";
 import tagIconImg from "@/assets/tag.png";
 import { useCart } from "@/context/CartContext";
 import { useCreateOrder } from "@/hooks/use-orders";
+import { useProducts } from "@/hooks/use-products";
 import { useCustomer } from "@/context/CustomerContext";
 import { useHub } from "@/context/HubContext";
 import { useCoupons } from "@/hooks/use-coupons";
@@ -164,6 +165,7 @@ export function CartDrawer() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [, navigate] = useLocation();
+  const { data: liveProducts = [] } = useProducts();
 
   const [isSuccess, setIsSuccess] = useState(false);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
@@ -307,6 +309,8 @@ export function CartDrawer() {
   const { data: timeslots = [], isLoading: timeslotsLoading } = useQuery<Timeslot[]>({
     queryKey: ["/api/timeslots"],
     enabled: isCartOpen,
+    refetchInterval: isCartOpen ? 1_000 : false,
+    refetchIntervalInBackground: true,
   });
 
   // Convert a time string to a Date (handles both "21:30" 24h and "9:30 PM" 12h formats)
@@ -424,8 +428,15 @@ export function CartDrawer() {
   }, [timeslots, isSlotAvailable, isSlotActiveOnDay, extractSlotStartTime, parseTimeStr, getDateKey]);
 
   const preorderItems = useMemo(
-    () => items.filter((item) => item.isPreorderCheckout),
-    [items],
+    () => items
+      .filter((item) => item.isPreorderCheckout)
+      .map((item) => {
+        const liveProduct = liveProducts.find((product) => String(product.id) === String(item.id));
+        // Keep quantity/instructions from the cart while using the newest
+        // product availability schedule from the polling query.
+        return liveProduct ? { ...item, ...liveProduct } : item;
+      }),
+    [items, liveProducts],
   );
 
   const isPreorderProductDateAvailable = useCallback((date: Date): boolean => {
