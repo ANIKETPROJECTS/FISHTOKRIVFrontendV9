@@ -16,9 +16,6 @@ export function normalizePreorderAvailability(value: unknown): PreorderAvailabil
   }
 
   const raw = value as Record<string, unknown>;
-  const type = PREORDER_AVAILABILITY_TYPES.includes(raw.type as PreorderAvailabilityType)
-    ? raw.type as PreorderAvailabilityType
-    : "all";
   const weekdays = Array.isArray(raw.weekdays)
     ? raw.weekdays
       .map(Number)
@@ -26,12 +23,30 @@ export function normalizePreorderAvailability(value: unknown): PreorderAvailabil
       .filter((day, index, days) => days.indexOf(day) === index)
       .sort((a, b) => a - b)
     : ALL_WEEKDAYS;
+  const startDate = typeof raw.startDate === "string" ? raw.startDate : "";
+  const endDate = typeof raw.endDate === "string" ? raw.endDate : "";
+  const rawType = PREORDER_AVAILABILITY_TYPES.includes(raw.type as PreorderAvailabilityType)
+    ? raw.type as PreorderAvailabilityType
+    : null;
+
+  // The external admin editor has stored constrained schedules with
+  // type:"all" while still persisting weekdays/startDate/endDate. Infer the
+  // effective rule from those fields so the storefront does not reopen every
+  // date. Explicit constrained fields always take precedence over that legacy
+  // type value.
+  const hasDateRange = Boolean(startDate || endDate);
+  const hasWeekdayRestriction = weekdays.length < ALL_WEEKDAYS.length;
+  const type: PreorderAvailabilityType = hasDateRange
+    ? "date_range"
+    : hasWeekdayRestriction
+      ? "weekdays"
+      : rawType ?? "all";
 
   return {
     type,
     weekdays,
-    startDate: typeof raw.startDate === "string" ? raw.startDate : "",
-    endDate: typeof raw.endDate === "string" ? raw.endDate : "",
+    startDate,
+    endDate,
   };
 }
 
