@@ -676,18 +676,26 @@ export async function registerRoutes(
       const port = process.env.PORT || "5000";
       const createRes = await fetch(`http://localhost:${port}/api/orders`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-FishTokri-Paid-Recovery": "1",
+        },
         body: JSON.stringify(orderPayload),
       });
 
       if (createRes.ok) {
         const created = await createRes.json() as any;
-        console.log(`[Razorpay webhook] Order created: orderId=${created.orderId ?? created.id} for payment ${razorpayPaymentId}`);
+        console.log(
+          `[Razorpay webhook] Order created: orderId=${created.orderId ?? created.id} ` +
+          `for payment ${razorpayPaymentId}; inventory review required`,
+        );
         // Clean up the pending checkout
         await PendingCheckout.deleteOne({ razorpayOrderId });
       } else {
         const errText = await createRes.text();
         console.error(`[Razorpay webhook] Order creation failed (${createRes.status}): ${errText}`);
+        // Do not delete the pending checkout. It remains recoverable by the
+        // reconciliation process/admin while Razorpay retries transient errors.
       }
     } catch (err) {
       console.error("[Razorpay webhook] Unexpected error:", err);
@@ -746,6 +754,14 @@ export async function registerRoutes(
   app.post(api.orders.create.path, async (req, res) => {
     try {
       const input = api.orders.create.input.parse(req.body);
+      // A captured payment must never disappear just because inventory changed
+      // between checkout and webhook delivery. The webhook sets this internal
+      // header so we record a paid order for admin resolution without deducting
+      // stock a second time or rejecting the payment.
+      const recoveryHeader = req.headers["x-fishtokri-paid-recovery"] === "1";
+      const localAddress = req.socket.remoteAddress ?? "";
+      const isPaidWebhookRecovery = recoveryHeader &&
+        (localAddress === "127.0.0.1" || localAddress === "::1" || localAddress === "::ffff:127.0.0.1");
 
       // Preorder dates are product eligibility metadata, not a client-trusted
       // calendar choice. Re-read the current products and validate the one
@@ -961,7 +977,7 @@ export async function registerRoutes(
       }
 
       // FIFO inventory deduction if hubDbName is provided (atomic per-batch to prevent overselling)
-      if (input.hubDbName) {
+      if (input.hubDbName && !isPaidWebhookRecovery) {
         const hub = await getHubModels(input.hubDbName);
         for (const item of input.items) {
           // Always fetch the LATEST quantity from DB right before deducting
@@ -1309,7 +1325,9 @@ export async function registerRoutes(
         deliveryArea: input.deliveryArea,
         deliveryAddressDetail: addrDetail,
         pickupLocation: "",
-        notes: input.notes ?? "",
+        notes: isPaidWebhookRecovery
+          ? `${input.notes ?? ""}${input.notes ? " " : ""}[PAID - INVENTORY REVIEW REQUIRED]`
+          : input.notes ?? "",
         status: "pending",
         source: "online",
         subHubId: resolvedSubHubId ?? null,
