@@ -1325,9 +1325,7 @@ export async function registerRoutes(
         deliveryArea: input.deliveryArea,
         deliveryAddressDetail: addrDetail,
         pickupLocation: "",
-        notes: isPaidWebhookRecovery
-          ? `${input.notes ?? ""}${input.notes ? " " : ""}[PAID - INVENTORY REVIEW REQUIRED]`
-          : input.notes ?? "",
+        notes: input.notes ?? "",
         status: "pending",
         source: "online",
         subHubId: resolvedSubHubId ?? null,
