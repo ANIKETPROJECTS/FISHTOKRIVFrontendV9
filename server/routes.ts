@@ -206,19 +206,34 @@ export async function registerRoutes(
       const filter: any = { status: "Active" };
       if (superHubId) filter.superHubId = superHubId;
       const hubs = await SubHubModel.find(filter).lean();
-      res.json(hubs.map((h: any) => ({
+      const response = await Promise.all(hubs.map(async (h: any) => {
+        let pincodes = h.pincodes ?? [];
+        // Imported hubs may store pincode delay/charge records in the hub DB
+        // rather than the admin SubHub document. Prefer the admin config, but
+        // transparently use the hub-local collection when it is empty.
+        if (pincodes.length === 0 && h.dbName) {
+          try {
+            const hub = await getHubModels(h.dbName);
+            pincodes = await hub.Pincode.find({ isActive: { $ne: false } }).lean();
+          } catch (err) {
+            console.warn(`[hubs/sub] Could not read legacy pincodes for ${h.dbName}:`, err);
+          }
+        }
+        return ({
         id: h._id.toString(),
         superHubId: h.superHubId?.toString() ?? null,
         name: h.name,
         location: h.location ?? null,
         imageUrl: h.imageUrl ?? null,
         dbName: h.dbName,
-        pincodes: (h.pincodes ?? []).map((p: any) =>
+        pincodes: pincodes.map((p: any) =>
           typeof p === "string"
             ? { pincode: p, charge: 0, timeDelay: 0 }
             : { pincode: p.pincode, charge: p.charge ?? 0, timeDelay: p.timeDelay ?? 0 }
         ),
-      })));
+      });
+      }));
+      res.json(response);
     } catch (err) {
       res.status(500).json({ message: "Failed to fetch sub hubs" });
     }
@@ -1167,9 +1182,16 @@ export async function registerRoutes(
         try {
           const pincode = input.deliveryAddressDetail?.pincode;
           const subHubForCharge = await SubHubModel.findOne({ dbName: input.hubDbName }).lean() as any;
-          const pincodeConfig = pincode
-            ? (subHubForCharge?.pincodes ?? []).find((p: any) => String(p.pincode).trim() === String(pincode).trim())
-            : null;
+           let pincodeConfig = pincode
+             ? (subHubForCharge?.pincodes ?? []).find((p: any) => String(p.pincode).trim() === String(pincode).trim())
+             : null;
+           if (!pincodeConfig && input.hubDbName && pincode) {
+             const hubForPincode = await getHubModels(input.hubDbName);
+             pincodeConfig = await hubForPincode.Pincode.findOne({
+               pincode: String(pincode).trim(),
+               isActive: { $ne: false },
+             }).lean() as any;
+           }
           if (!pincodeConfig) {
             // No authoritative config found (unknown pincode, hub/dbName mismatch, or missing
             // pincode on the order) — we silently keep the client-submitted slotCharge below.

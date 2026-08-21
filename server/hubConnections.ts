@@ -146,6 +146,17 @@ const timeslotSchema = new mongoose.Schema({
   activeDays: [{ day: { type: String }, status: { type: String, enum: ["on", "off"], default: "on" } }],
 });
 
+// Legacy hub-local pincode configuration. Newer admin records keep pincodes
+// on SubHub, but imported hubs may still have the authoritative values here.
+const pincodeSchema = new mongoose.Schema({
+  pincode: { type: String, required: true },
+  area: { type: String, default: "" },
+  city: { type: String, default: "" },
+  isActive: { type: Boolean, default: true },
+  charge: { type: Number, default: 0 },
+  timeDelay: { type: Number, default: 0 },
+}, { collection: "pincodes" });
+
 const couponUsageSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   couponCode: { type: String, required: true, uppercase: true, trim: true },
@@ -168,6 +179,7 @@ export interface HubModels {
   Category: mongoose.Model<any>;
   Combo: mongoose.Model<any>;
   Timeslot: mongoose.Model<any>;
+  Pincode: mongoose.Model<any>;
   Coupon: mongoose.Model<any>;
   CouponUsage: mongoose.Model<any>;
   CouponLocationUsage: mongoose.Model<any>;
@@ -193,6 +205,7 @@ export async function getHubModels(dbName: string): Promise<HubModels> {
     Category: getModel("Category", categorySchema),
     Combo: getModel("Combo", comboSchema),
     Timeslot: getModel("Timeslot", timeslotSchema),
+    Pincode: getModel("Pincode", pincodeSchema),
     Coupon: getModel("Coupon", couponSchema),
     CouponUsage: getModel("CouponUsage", couponUsageSchema),
     CouponLocationUsage: getModel("CouponLocationUsage", couponLocationUsageSchema),
