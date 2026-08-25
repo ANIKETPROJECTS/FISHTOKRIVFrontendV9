@@ -416,6 +416,18 @@ export function CartDrawer() {
 
   const isPreorderCart = items.some((item) => item.isPreorderCheckout);
 
+  const preorderItems = useMemo(
+    () => items
+      .filter((item) => item.isPreorderCheckout)
+      .map((item) => {
+        const liveProduct = liveProducts.find((product) => String(product.id) === String(item.id));
+        // Keep quantity/instructions from the cart while using the newest
+        // product availability schedule from the polling query.
+        return liveProduct ? { ...item, ...liveProduct } : item;
+      }),
+    [items, liveProducts],
+  );
+
   const getDateKey = useCallback((date: Date): string => (
     `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`
   ), []);
@@ -448,18 +460,6 @@ export function CartDrawer() {
       return true;
     });
   }, [timeslots, isSlotAvailable, isSlotActiveOnDay, extractSlotStartTime, parseTimeStr, getDateKey, isPreorderCart, preorderItems]);
-
-  const preorderItems = useMemo(
-    () => items
-      .filter((item) => item.isPreorderCheckout)
-      .map((item) => {
-        const liveProduct = liveProducts.find((product) => String(product.id) === String(item.id));
-        // Keep quantity/instructions from the cart while using the newest
-        // product availability schedule from the polling query.
-        return liveProduct ? { ...item, ...liveProduct } : item;
-      }),
-    [items, liveProducts],
-  );
 
   const isPreorderProductDateAvailable = useCallback((date: Date): boolean => {
     const dateKey = getDateKey(date);

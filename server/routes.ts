@@ -826,15 +826,33 @@ export async function registerRoutes(
           }
 
           for (const item of input.items as any[]) {
-          const product = productsById.get(String(item.productId));
-          if (!product) {
-            return res.status(400).json({ message: `Product "${item.name}" is no longer available.` });
+            const product = productsById.get(String(item.productId));
+            if (!product) {
+              return res.status(400).json({ message: `Product "${item.name}" is no longer available.` });
+            }
+            const mode = normalizePreorderMode(product.preorderMode ?? product.preOrderMode);
+            if (mode === "normal") {
+              return res.status(400).json({ message: `"${product.name}" is not available for preorder.` });
+            }
           }
-          const mode = normalizePreorderMode(product.preorderMode ?? product.preOrderMode);
-          if (mode === "normal") {
-            return res.status(400).json({ message: `"${product.name}" is not available for preorder.` });
+          if (input.timeslotId) {
+            const weekday = String(parsedDate.getUTCDay());
+            const selectedSlot = await hub.Timeslot.findById(input.timeslotId)
+              .select("_id isActive").lean() as any;
+            if (!selectedSlot || selectedSlot.isActive === false) {
+              return res.status(400).json({ message: "This preorder time slot is no longer available." });
+            }
+            const invalidProduct = products.find((product) => {
+              const rules = normalizePreorderAvailability(product.preorderAvailability);
+              const allowed = rules.timeslotIdsByWeekday?.[weekday];
+              return allowed !== undefined && !allowed.includes(String(input.timeslotId));
+            });
+            if (invalidProduct) {
+              return res.status(400).json({
+                message: `"${invalidProduct.name}" is not available in the selected time slot.`,
+              });
+            }
           }
-        }
       }
 
       // ── Pre-flight: payment-reference idempotency check ──────────────────────
