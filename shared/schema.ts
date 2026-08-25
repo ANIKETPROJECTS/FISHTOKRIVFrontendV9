@@ -275,6 +275,7 @@ export const insertProductSchema = z.object({
     weekdays: z.array(z.number().int().min(0).max(6)).optional(),
     startDate: z.string().optional(),
     endDate: z.string().optional(),
+    timeslotIdsByWeekday: z.record(z.string(), z.array(z.string())).optional(),
   }).nullable().optional(),
   recipes: z.array(z.object({
     title: z.string(),

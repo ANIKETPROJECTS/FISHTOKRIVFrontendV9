@@ -1,4 +1,4 @@
-export const PREORDER_AVAILABILITY_TYPES = ["all", "weekdays", "date_range"] as const;
+export const PREORDER_AVAILABILITY_TYPES = ["all", "weekdays", "date_range", "date_range_and_weekdays"] as const;
 export type PreorderAvailabilityType = (typeof PREORDER_AVAILABILITY_TYPES)[number];
 
 export type PreorderAvailability = {
@@ -6,6 +6,7 @@ export type PreorderAvailability = {
   weekdays?: number[];
   startDate?: string;
   endDate?: string;
+  timeslotIdsByWeekday?: Record<string, string[]>;
 };
 
 const ALL_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
@@ -25,6 +26,14 @@ export function normalizePreorderAvailability(value: unknown): PreorderAvailabil
     : ALL_WEEKDAYS;
   const startDate = typeof raw.startDate === "string" ? raw.startDate : "";
   const endDate = typeof raw.endDate === "string" ? raw.endDate : "";
+  const timeslotIdsByWeekday = raw.timeslotIdsByWeekday && typeof raw.timeslotIdsByWeekday === "object"
+    ? Object.fromEntries(
+      Object.entries(raw.timeslotIdsByWeekday as Record<string, unknown>).map(([day, ids]) => [
+        day,
+        Array.isArray(ids) ? ids.map(String) : [],
+      ]),
+    )
+    : undefined;
   const rawType = PREORDER_AVAILABILITY_TYPES.includes(raw.type as PreorderAvailabilityType)
     ? raw.type as PreorderAvailabilityType
     : null;
@@ -37,7 +46,7 @@ export function normalizePreorderAvailability(value: unknown): PreorderAvailabil
   const hasDateRange = Boolean(startDate || endDate);
   const hasWeekdayRestriction = weekdays.length < ALL_WEEKDAYS.length;
   const type: PreorderAvailabilityType = hasDateRange
-    ? "date_range"
+    ? (hasWeekdayRestriction ? "date_range_and_weekdays" : "date_range")
     : hasWeekdayRestriction
       ? "weekdays"
       : rawType ?? "all";
@@ -47,6 +56,7 @@ export function normalizePreorderAvailability(value: unknown): PreorderAvailabil
     weekdays,
     startDate,
     endDate,
+    timeslotIdsByWeekday,
   };
 }
 
@@ -69,10 +79,10 @@ export function isPreorderDateAvailable(
   if (!rule.startDate && !rule.endDate) return false;
 
   // The admin editor can constrain a date range to selected weekdays.
-  // Both conditions must match: the date must be inside the inclusive range
-  // and its weekday must be one of the selected days.
+  // Both conditions must match for date_range_and_weekdays.
   const weekday = new Date(`${dateKey}T00:00:00Z`).getUTCDay();
-  return (rule.weekdays ?? ALL_WEEKDAYS).includes(weekday);
+  return rule.type === "date_range"
+    || (rule.weekdays ?? ALL_WEEKDAYS).includes(weekday);
 }
 
 /**

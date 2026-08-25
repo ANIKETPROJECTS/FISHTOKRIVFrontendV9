@@ -164,6 +164,20 @@ function formatPreorderAvailability(item: any): string {
   return "Available on all future dates";
 }
 
+function isPreorderTimeslotAllowedForItems(
+  slot: Timeslot,
+  date: Date,
+  preorderItems: any[],
+): boolean {
+  const weekday = String(date.getDay());
+  return preorderItems.every((item) => {
+    const rules = normalizePreorderAvailability(item.preorderAvailability);
+    const perDay = rules.timeslotIdsByWeekday?.[weekday];
+    // No key means all active slots are allowed for that product/day.
+    return perDay === undefined || perDay.includes(String(slot.id));
+  });
+}
+
 export function CartDrawer() {
   const { isCartOpen, setIsCartOpen, items, updateQuantity, updateInstruction, totalPrice, clearCart, appliedCoupon, setAppliedCoupon, discountAmount, computeMaxQty } = useCart();
   const { mutate: createOrder, isPending } = useCreateOrder();
@@ -412,6 +426,7 @@ export function CartDrawer() {
     return timeslots.filter((slot) => {
       if (slot.isInstant) return isToday && isSlotActiveOnDay(slot, date) && isSlotAvailable(slot);
       if (!isSlotActiveOnDay(slot, date)) return false;
+      if (isPreorderCart && !isPreorderTimeslotAllowedForItems(slot, date, preorderItems)) return false;
       if (slot.orderLimit > 0) {
         const orderCount =
           isToday ? slot.todaysOrderCount :
@@ -432,7 +447,7 @@ export function CartDrawer() {
       }
       return true;
     });
-  }, [timeslots, isSlotAvailable, isSlotActiveOnDay, extractSlotStartTime, parseTimeStr, getDateKey]);
+  }, [timeslots, isSlotAvailable, isSlotActiveOnDay, extractSlotStartTime, parseTimeStr, getDateKey, isPreorderCart, preorderItems]);
 
   const preorderItems = useMemo(
     () => items
