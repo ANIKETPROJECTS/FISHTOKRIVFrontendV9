@@ -455,6 +455,12 @@ export function CartDrawer() {
   }, [getDateKey, preorderItems]);
 
   const isPreorderDateSelectable = useCallback((date: Date): boolean => {
+    // Preorders are for future delivery only. Keep today and all earlier dates
+    // unavailable even if a slot or product schedule happens to match.
+    const tomorrow = startOfTomorrow();
+    const candidate = new Date(date);
+    candidate.setHours(0, 0, 0, 0);
+    if (candidate < tomorrow) return false;
     if (!isPreorderProductDateAvailable(date)) return false;
     return getAvailableTimeslotsForDate(date, false).length > 0;
   }, [getAvailableTimeslotsForDate, isPreorderProductDateAvailable]);
