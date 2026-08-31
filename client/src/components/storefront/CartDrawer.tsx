@@ -915,6 +915,18 @@ export function CartDrawer() {
       toast({ title: "Please select a delivery time slot", variant: "destructive" });
       return;
     }
+    // A cart can stay open past the 30-minute cutoff after the slot was selected.
+    // Recheck immediately before starting checkout; the server repeats this
+    // validation as the authoritative guard.
+    if (!isPreorderCart && !isNextDay && !isSlotAvailable(selectedTimeslot)) {
+      setSelectedTimeslotId(null);
+      toast({
+        title: "This delivery slot has closed",
+        description: "Please choose another available time slot.",
+        variant: "destructive",
+      });
+      return;
+    }
     // Hard guard against the delivery-charge race (see explain.md): never submit a
     // delivery order before the hub/pincode config has loaded. Without this, a fast tap
     // right after the app loads (or right after resuming from backgrounding a UPI app)
@@ -975,8 +987,13 @@ export function CartDrawer() {
         body: JSON.stringify({ amount: finalTotal, orderPayload: pendingOrderPayload }),
       });
       if (!res.ok) {
-        toast({ title: "Could not initiate payment. Please try again.", variant: "destructive" });
+        const errorData = await res.json().catch(() => null);
+        toast({
+          title: errorData?.message || "Could not initiate payment. Please try again.",
+          variant: "destructive",
+        });
         setIsProcessingPayment(false);
+        setIsCartOpen(true);
         return;
       }
       const { order_id, amount: rzpAmount, currency } = await res.json();

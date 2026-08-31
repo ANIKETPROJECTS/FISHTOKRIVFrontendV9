@@ -8,3 +8,4 @@
 - [TypeScript check heap limit](typescript-check-heap.md) — repository-wide tsc can exhaust Node memory here; use the production build as compile verification.
 - [Environment precedence](env-precedence.md) — keep ecosystem defaults intact; runtime Replit Secrets override them in the launcher.
 - [Preorder date-specific slots](preorder-date-slots.md) — preorder checkout selects a future date and filters slots by configured active weekdays.
+- [Same-day slot cutoff](same-day-slot-cutoff.md) — enforce the 30-minute cutoff server-side in India time; stale carts can submit after the UI hides a slot.

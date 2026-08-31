@@ -29,6 +29,99 @@ declare module "express-session" {
 }
 
 const OTP_TTL_MS = 5 * 60 * 1000;
+const INDIA_TIME_ZONE = "Asia/Kolkata";
+
+function getIndiaDateKey(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: INDIA_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function getIndiaMinutesSinceMidnight(date = new Date()): number {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: INDIA_TIME_ZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return Number(values.hour) * 60 + Number(values.minute);
+}
+
+function parseTimeslotStartMinutes(timeslot: any): number | null {
+  const source = String(timeslot.startTime ?? timeslot.label ?? "").trim();
+  const match = source.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?/i);
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2] ?? 0);
+  const period = match[3]?.toUpperCase();
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute > 59) return null;
+  if (period === "AM" && hour === 12) hour = 0;
+  if (period === "PM" && hour !== 12) hour += 12;
+  if (hour > 23) return null;
+  return hour * 60 + minute;
+}
+
+async function validateTimeslotBeforeCheckout(params: {
+  hubDbName?: string | null;
+  timeslotId?: string | null;
+  deliveryDate?: string | null;
+  scheduleType?: string | null;
+}): Promise<string | null> {
+  if (!params.hubDbName || !params.timeslotId || params.scheduleType === "instant") return null;
+
+  const hub = await getHubModels(params.hubDbName);
+  const timeslot = await hub.Timeslot.findById(params.timeslotId).lean() as any;
+  if (!timeslot || timeslot.isActive === false) {
+    return "This delivery time slot is no longer available.";
+  }
+
+  const dateKey = params.deliveryDate ?? getIndiaDateKey();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return "Please choose a valid delivery date.";
+  const date = new Date(`${dateKey}T00:00:00Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== dateKey) {
+    return "Please choose a valid delivery date.";
+  }
+  if (dateKey < getIndiaDateKey()) return "Delivery date cannot be in the past.";
+
+  const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  const dayConfig = (timeslot.activeDays ?? []).find(
+    (entry: any) => String(entry.day).toLowerCase() === dayNames[date.getUTCDay()],
+  );
+  if (dayConfig?.status === "off") {
+    return "This time slot is disabled for the selected date.";
+  }
+
+  // The browser removes today's slots 30 minutes before their start time.
+  // Repeat that check here so stale tabs cannot submit an old selection.
+  if (dateKey === getIndiaDateKey()) {
+    const startMinutes = parseTimeslotStartMinutes(timeslot);
+    if (startMinutes !== null && getIndiaMinutesSinceMidnight() >= startMinutes - 30) {
+      return "This delivery time slot has closed for today. Please choose another slot.";
+    }
+  }
+
+  const todayKey = getIndiaDateKey();
+  const tomorrowDate = new Date(`${todayKey}T00:00:00Z`);
+  tomorrowDate.setUTCDate(tomorrowDate.getUTCDate() + 1);
+  const tomorrowKey = tomorrowDate.toISOString().slice(0, 10);
+  if (timeslot.orderLimit > 0 && dateKey === todayKey &&
+      (timeslot.todaysOrderCount ?? 0) >= timeslot.orderLimit) {
+    return "This time slot is full for today.";
+  }
+  if (timeslot.orderLimit > 0 && dateKey === tomorrowKey &&
+      (timeslot.nextDayOrderCount ?? 0) >= timeslot.orderLimit) {
+    return "This time slot is full for the selected date.";
+  }
+
+  return null;
+}
 
 // ── Admark WhatsApp helper ────────────────────────────────────────────────
 const ADMARK_API_URL = "https://verifiedwhatsapp.admarksolution.com/api/send/bytemplate";
@@ -553,6 +646,20 @@ export async function registerRoutes(
       if (!amount || typeof amount !== "number" || amount <= 0) {
         return res.status(400).json({ message: "Invalid amount" });
       }
+      if (orderPayload && typeof orderPayload === "object") {
+        try {
+          const slotError = await validateTimeslotBeforeCheckout({
+            hubDbName: orderPayload.hubDbName,
+            timeslotId: orderPayload.timeslotId,
+            deliveryDate: orderPayload.deliveryDate,
+            scheduleType: orderPayload.scheduleType,
+          });
+          if (slotError) return res.status(400).json({ message: slotError });
+        } catch (slotValidationErr) {
+          console.error("[Razorpay] Pre-payment timeslot validation error:", slotValidationErr);
+          return res.status(400).json({ message: "Could not validate the selected delivery slot." });
+        }
+      }
       const order = await razorpay.orders.create({
         amount: Math.round(amount * 100),
         currency: "INR",
@@ -929,46 +1036,13 @@ export async function registerRoutes(
       // handcrafted request from ordering on a weekday that the admin disabled.
       if (input.timeslotId && input.hubDbName && input.scheduleType !== "instant") {
         try {
-          const hub = await getHubModels(input.hubDbName);
-          const timeslot = await hub.Timeslot.findById(input.timeslotId).lean() as any;
-          if (!timeslot || timeslot.isActive === false) {
-            return res.status(400).json({ message: "This delivery time slot is no longer available." });
-          }
-
-          const dateText = input.deliveryDate;
-          const deliveryDate = dateText ? new Date(`${dateText}T00:00:00`) : new Date();
-          if (Number.isNaN(deliveryDate.getTime())) {
-            return res.status(400).json({ message: "Please choose a valid delivery date." });
-          }
-          deliveryDate.setHours(0, 0, 0, 0);
-          const today = new Date();
-          today.setHours(0, 0, 0, 0);
-          if (deliveryDate < today) {
-            return res.status(400).json({ message: "Delivery date cannot be in the past." });
-          }
-
-          const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-          const dayName = dayNames[deliveryDate.getDay()];
-          const dayConfig = (timeslot.activeDays ?? []).find(
-            (entry: any) => String(entry.day).toLowerCase() === dayName,
-          );
-          if (dayConfig?.status === "off") {
-            return res.status(400).json({ message: "This time slot is disabled for the selected date." });
-          }
-
-          // The current hub schema tracks capacity for today and next day.
-          // Future dates are still governed by activeDays, but do not consume
-          // either rolling count because that would affect the wrong date.
-          const tomorrow = new Date(today);
-          tomorrow.setDate(tomorrow.getDate() + 1);
-          if (timeslot.orderLimit > 0 && deliveryDate.getTime() === today.getTime() &&
-              (timeslot.todaysOrderCount ?? 0) >= timeslot.orderLimit) {
-            return res.status(400).json({ message: "This time slot is full for today." });
-          }
-          if (timeslot.orderLimit > 0 && deliveryDate.getTime() === tomorrow.getTime() &&
-              (timeslot.nextDayOrderCount ?? 0) >= timeslot.orderLimit) {
-            return res.status(400).json({ message: "This time slot is full for the selected date." });
-          }
+          const slotError = await validateTimeslotBeforeCheckout({
+            hubDbName: input.hubDbName,
+            timeslotId: input.timeslotId,
+            deliveryDate: input.deliveryDate,
+            scheduleType: input.scheduleType,
+          });
+          if (slotError) return res.status(400).json({ message: slotError });
         } catch (timeslotValidationErr) {
           console.error("[Timeslot] Validation error:", timeslotValidationErr);
           return res.status(400).json({ message: "Could not validate the selected delivery slot." });
