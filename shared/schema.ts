@@ -489,6 +489,7 @@ export type Combo = {
   fullDescription: string | null;
   serves: string | null;
   weight: string | null;
+  imageUrl: string | null;
   discountedPrice: number;
   originalPrice: number;
   discount: number;
@@ -505,6 +506,7 @@ export type InsertCombo = {
   fullDescription?: string | null;
   serves?: string | null;
   weight?: string | null;
+  imageUrl?: string | null;
   discountedPrice: number;
   originalPrice: number;
   discount?: number;
@@ -521,6 +523,7 @@ export const insertComboSchema = z.object({
   fullDescription: z.string().nullable().optional(),
   serves: z.string().nullable().optional(),
   weight: z.string().nullable().optional(),
+  imageUrl: z.string().nullable().optional(),
   discountedPrice: z.number().min(0),
   originalPrice: z.number().min(0),
   discount: z.number().optional(),

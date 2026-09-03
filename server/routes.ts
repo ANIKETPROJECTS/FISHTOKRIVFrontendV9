@@ -425,7 +425,7 @@ export async function registerRoutes(
   const toCombo = (doc: any) => ({
     id: doc._id.toString(), name: doc.name, description: doc.description ?? null,
     fullDescription: doc.fullDescription ?? null, serves: doc.serves ?? null,
-    weight: doc.weight ?? null, discountedPrice: doc.discountedPrice,
+    weight: doc.weight ?? null, imageUrl: doc.imageUrl ?? null, discountedPrice: doc.discountedPrice,
     originalPrice: doc.originalPrice, discount: doc.discount ?? 0,
     includes: (doc.includes ?? []).map((i: any) => ({ productId: i.productId, label: i.label })),
     tags: doc.tags ?? [], nutrition: (doc.nutrition ?? []).map((n: any) => ({ label: n.label, value: n.value, icon: n.icon ?? "" })),

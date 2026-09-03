@@ -121,6 +121,7 @@ const comboSchema = new mongoose.Schema({
   fullDescription: { type: String, default: null },
   serves: { type: String, default: null },
   weight: { type: String, default: null },
+  imageUrl: { type: String, default: null },
   discountedPrice: { type: Number, required: true },
   originalPrice: { type: Number, required: true },
   discount: { type: Number, default: 0 },
