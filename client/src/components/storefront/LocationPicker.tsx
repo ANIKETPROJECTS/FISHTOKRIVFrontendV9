@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, Loader2, ArrowLeft } from "lucide-react";
+import { CheckCircle2, Loader2, ArrowLeft, X } from "lucide-react";
 import { useHub, SuperHub, SubHub } from "@/context/HubContext";
 import Lottie from "lottie-react";
 import deliveryAnim from "@assets/animation-original_(21)_1779949238004.json";
@@ -16,7 +16,7 @@ const WA_LINK = `https://wa.me/${PHONE.replace("+", "")}?text=${encodeURICompone
 type CheckStatus = "idle" | "checking" | "eligible" | "ineligible";
 
 export function LocationPicker() {
-  const { isPickerOpen, isPickerRequired, closePicker, setHub } = useHub();
+  const { isPickerOpen, isPickerRequired, closePicker, skipPicker, setHub } = useHub();
 
   const [digits, setDigits] = useState(["", "", "", "", "", ""]);
   const [status, setStatus] = useState<CheckStatus>("idle");
@@ -135,7 +135,7 @@ export function LocationPicker() {
     e.preventDefault();
   };
 
-  const handleClose = () => { closePicker(); reset(); };
+  const handleClose = () => { skipPicker(); reset(); };
 
   if (!isPickerOpen) return null;
 
@@ -150,6 +150,15 @@ export function LocationPicker() {
       />
 
       <div className="relative bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden">
+        <button
+          type="button"
+          onClick={handleClose}
+          aria-label="Skip pincode and view website"
+          className="absolute top-3 right-3 z-10 w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:text-slate-800 hover:bg-slate-100 transition-colors"
+          data-testid="button-skip-pincode"
+        >
+          <X className="w-5 h-5" />
+        </button>
 
         {/* ── INELIGIBLE SCREEN ── */}
         {status === "ineligible" ? (
@@ -220,16 +229,27 @@ export function LocationPicker() {
               </a>
             </div>
 
-            {/* Try again */}
-            <button
-              onClick={reset}
-              className="mt-4 flex items-center gap-1.5 text-xs font-medium transition-opacity hover:opacity-70"
-              style={{ color: BRAND_BLUE }}
-              data-testid="button-try-another-pincode"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              Try another pincode
-            </button>
+            {/* Try again / skip */}
+            <div className="mt-4 flex items-center justify-center gap-4 text-xs font-medium">
+              <button
+                onClick={reset}
+                className="flex items-center gap-1.5 transition-opacity hover:opacity-70"
+                style={{ color: BRAND_BLUE }}
+                data-testid="button-try-another-pincode"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Try another pincode
+              </button>
+              <span className="text-slate-300" aria-hidden="true">|</span>
+              <button
+                onClick={handleClose}
+                className="transition-opacity hover:opacity-70"
+                style={{ color: BRAND_BLUE }}
+                data-testid="button-navigate-website"
+              >
+                Navigate Website
+              </button>
+            </div>
           </div>
 
         ) : (

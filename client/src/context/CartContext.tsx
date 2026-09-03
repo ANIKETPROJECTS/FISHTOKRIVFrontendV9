@@ -3,6 +3,7 @@ import type { Product, Coupon } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
 import { useCustomer } from "@/context/CustomerContext";
 import { useProducts } from "@/hooks/use-products";
+import { useHub } from "@/context/HubContext";
 
 export interface ComboInclude {
   productId: string;
@@ -119,6 +120,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const [appliedCoupon, setAppliedCoupon] = useState<Coupon | null>(null);
   const { toast } = useToast();
   const { customer, openLoginModal } = useCustomer();
+  const { isPincodeVerified, openPicker } = useHub();
   const { data: liveProducts } = useProducts();
   // Track IDs already notified so we only toast once per expiry event
   const notifiedExpiredIds = useRef<Set<string>>(new Set());
@@ -126,6 +128,16 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const addToCart = (product: Product | CartItem, quantity = 1, openCart = false) => {
     if (!customer) {
       openLoginModal();
+      return;
+    }
+    if (!isPincodeVerified) {
+      toast({
+        title: "Pincode required",
+        description: "Please enter a valid pincode before adding items to your cart.",
+        variant: "destructive",
+        duration: 3000,
+      });
+      openPicker();
       return;
     }
 

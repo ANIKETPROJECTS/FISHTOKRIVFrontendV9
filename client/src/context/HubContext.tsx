@@ -27,6 +27,7 @@ export interface SubHub {
 interface HubContextValue {
   selectedSuperHub: SuperHub | null;
   selectedSubHub: SubHub | null;
+  isPincodeVerified: boolean;
   // True once the hub/pincode config has been loaded at least once (from cache or
   // network) for the current session. Any code that needs to trust
   // selectedSubHub.pincodes (e.g. checkout delivery-charge lookup) MUST wait for this
@@ -38,11 +39,13 @@ interface HubContextValue {
   isPickerRequired: boolean;
   openPicker: () => void;
   closePicker: () => void;
+  skipPicker: () => void;
 }
 
 const HubContext = createContext<HubContextValue>({
   selectedSuperHub: null,
   selectedSubHub: null,
+  isPincodeVerified: false,
   isHubReady: false,
   setHub: () => {},
   clearHub: () => {},
@@ -50,6 +53,7 @@ const HubContext = createContext<HubContextValue>({
   isPickerRequired: false,
   openPicker: () => {},
   closePicker: () => {},
+  skipPicker: () => {},
 });
 
 const STORAGE_KEY = "fishtokri_hub";
@@ -81,6 +85,7 @@ async function fetchDefaultHub(): Promise<{ superHub: SuperHub; subHub: SubHub }
 export function HubProvider({ children }: { children: ReactNode }) {
   const [selectedSuperHub, setSelectedSuperHub] = useState<SuperHub | null>(null);
   const [selectedSubHub, setSelectedSubHub] = useState<SubHub | null>(null);
+  const [isPincodeVerified, setIsPincodeVerified] = useState(false);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isPickerRequired, setIsPickerRequired] = useState(false);
   const [isHubReady, setIsHubReady] = useState(false);
@@ -95,6 +100,7 @@ export function HubProvider({ children }: { children: ReactNode }) {
           // Load cached data immediately so the app renders fast
           setSelectedSuperHub(superHub);
           setSelectedSubHub(subHub);
+          setIsPincodeVerified(true);
           setActiveHubDb(subHub.dbName);
           // Cached pincode config is already usable, so checkout can trust it —
           // do NOT wait for the background refresh below before flipping this on.
@@ -128,7 +134,7 @@ export function HubProvider({ children }: { children: ReactNode }) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({ superHub, subHub }));
         queryClient.invalidateQueries();
       }
-      // Force the picker open — user must enter their pincode before using the site
+      // Show the picker on first visit; users can dismiss it to browse without ordering.
       setIsPickerOpen(true);
       setIsPickerRequired(true);
     };
@@ -139,6 +145,7 @@ export function HubProvider({ children }: { children: ReactNode }) {
   const setHub = useCallback((superHub: SuperHub, subHub: SubHub) => {
     setSelectedSuperHub(superHub);
     setSelectedSubHub(subHub);
+    setIsPincodeVerified(true);
     setActiveHubDb(subHub.dbName);
     setIsHubReady(true);
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ superHub, subHub }));
@@ -151,6 +158,7 @@ export function HubProvider({ children }: { children: ReactNode }) {
   const clearHub = useCallback(() => {
     setSelectedSuperHub(null);
     setSelectedSubHub(null);
+    setIsPincodeVerified(false);
     setActiveHubDb(null);
     setIsHubReady(false);
     localStorage.removeItem(STORAGE_KEY);
@@ -160,10 +168,14 @@ export function HubProvider({ children }: { children: ReactNode }) {
 
   return (
     <HubContext.Provider value={{
-      selectedSuperHub, selectedSubHub, isHubReady, setHub, clearHub,
+      selectedSuperHub, selectedSubHub, isPincodeVerified, isHubReady, setHub, clearHub,
       isPickerOpen, isPickerRequired,
       openPicker: () => setIsPickerOpen(true),
       closePicker: () => { if (!isPickerRequired) setIsPickerOpen(false); },
+      skipPicker: () => {
+        setIsPickerOpen(false);
+        setIsPickerRequired(false);
+      },
     }}>
       {children}
     </HubContext.Provider>
