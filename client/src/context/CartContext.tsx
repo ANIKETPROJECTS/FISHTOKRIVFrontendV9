@@ -18,7 +18,6 @@ export interface CartItem extends Omit<Product, 'id'> {
   isPreorderCheckout?: boolean;
   isCombo?: boolean;
   originalId?: string;
-  comboImageUrl?: string | null;
   comboImages?: string[];
   comboCategories?: string[];
   comboIncludes?: ComboInclude[];

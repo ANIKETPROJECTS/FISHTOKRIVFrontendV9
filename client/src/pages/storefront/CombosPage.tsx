@@ -17,7 +17,14 @@ function getFallbackImage(_category: string): string {
   return noImageImg;
 }
 
-function ComboImages({ images }: { images: string[] }) {
+function ComboImages({ images, imageUrl }: { images: string[]; imageUrl?: string | null }) {
+  if (imageUrl?.trim()) {
+    return (
+      <div className="relative w-full h-full overflow-hidden">
+        <img src={imageUrl} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
+      </div>
+    );
+  }
   const n = images.length;
   const slotPct = 100 / n;
   const widthPct = n === 1 ? 100 : slotPct + slotPct * 0.45;
@@ -67,7 +74,7 @@ function ComboCard({ combo, productMap }: { combo: Combo; productMap: Record<str
     const comboAvailableQty = qtysWithLimits.length > 0 ? Math.min(...qtysWithLimits) : null;
     return {
       id: comboCartId, originalId: combo.id, name: combo.name, price: combo.discountedPrice,
-      category: "Combo", status: "available", unit: combo.weight, imageUrl: null,
+      category: "Combo", status: "available", unit: combo.weight, imageUrl: combo.imageUrl ?? null,
       isArchived: false, updatedAt: new Date(), limitedStockNote: null, sectionId: null,
       isCombo: true, comboImages, comboCategories, availableQty: comboAvailableQty,
       comboIncludes: combo.includes.map(inc => ({
@@ -81,7 +88,7 @@ function ComboCard({ combo, productMap }: { combo: Combo; productMap: Record<str
     <div className="group relative bg-card flex flex-col transition-all duration-300 cursor-pointer rounded-2xl overflow-hidden border border-border/20 shadow-sm">
       <Link href={`/combo/${combo.id}`}>
         <div className="relative aspect-[10/7] w-full bg-muted/30 overflow-hidden">
-          <ComboImages images={comboImages} />
+          <ComboImages images={comboImages} imageUrl={combo.imageUrl} />
           <div className="absolute top-0 left-0 z-10">
             <div className="relative bg-accent text-white pl-3 pr-5 py-2 shadow-md rounded-tl-2xl">
               <div className="text-[11px] font-bold leading-tight uppercase tracking-wide">Combo</div>

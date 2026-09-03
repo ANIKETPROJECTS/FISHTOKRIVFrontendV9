@@ -40,12 +40,22 @@ function getFallbackImage(_category: string) {
   return noImageImg;
 }
 
-function ComboHeroImage({ productImages, productCategories, name, tags }: {
+function ComboHeroImage({ productImages, productCategories, name, tags, imageUrl }: {
   productImages: string[];
   productCategories: string[];
   name: string;
   tags: string[];
+  imageUrl?: string | null;
 }) {
+  if (imageUrl?.trim()) {
+    return (
+      <div className="relative">
+        <div className="aspect-[4/3] sm:aspect-square rounded-3xl overflow-hidden border border-border/20 shadow-xl bg-muted/10">
+          <img src={imageUrl} alt={name} className="w-full h-full object-cover" />
+        </div>
+      </div>
+    );
+  }
   const images = productImages.length > 0
     ? productImages
     : productCategories.map(getFallbackImage);
@@ -253,7 +263,14 @@ function IncludedProductCard({ item, product, comboItemPrice }: {
   );
 }
 
-function ComboImages({ images }: { images: string[] }) {
+function ComboImages({ images, imageUrl }: { images: string[]; imageUrl?: string | null }) {
+  if (imageUrl?.trim()) {
+    return (
+      <div className="relative w-full h-full overflow-hidden">
+        <img src={imageUrl} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
+      </div>
+    );
+  }
   const n = images.length;
   if (n === 0) return <div className="w-full h-full flex items-center justify-center text-4xl">🎁</div>;
   const slotPct = 100 / n;
@@ -293,7 +310,7 @@ function ComboCard({ combo, productMap }: { combo: Combo; productMap: Record<str
     >
       <div className="relative aspect-square w-full bg-muted/30 overflow-hidden mb-3 border border-border/20 rounded-xl">
         <div className="w-full h-full group-hover:scale-110 transition-transform duration-700">
-          <ComboImages images={comboImages} />
+          <ComboImages images={comboImages} imageUrl={combo.imageUrl} />
         </div>
         <div className="absolute top-2 left-2">
           <span className="bg-primary/90 backdrop-blur text-white text-[10px] font-bold px-2 py-0.5 rounded-full">Combo</span>
@@ -449,7 +466,7 @@ export default function ComboDetail() {
         category: "Combo",
         status: "available",
         unit: combo.weight ?? undefined,
-        imageUrl: null,
+        imageUrl: combo.imageUrl ?? null,
         isArchived: false,
         updatedAt: new Date(),
         limitedStockNote: null,
@@ -563,7 +580,8 @@ export default function ComboDetail() {
             productImages={productImages}
             productCategories={productCategories}
             name={combo.name}
-            tags={combo.tags}
+             tags={combo.tags}
+             imageUrl={combo.imageUrl}
           />
 
           {/* RIGHT – Details */}

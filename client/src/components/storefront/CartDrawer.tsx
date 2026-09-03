@@ -1291,7 +1291,9 @@ export function CartDrawer() {
                         <div key={item.id} className="overflow-hidden" data-testid={`cart-item-${item.id}`}>
                           <div className="flex items-center gap-3 p-3">
                             <div className="w-20 h-20 overflow-hidden flex-shrink-0 rounded-xl border border-border/20">
-                              {item.isCombo && item.comboImages && item.comboImages.length > 0 ? (
+                              {item.isCombo && item.imageUrl ? (
+                                <img src={item.imageUrl} alt={item.name} className="w-full h-full object-cover" />
+                              ) : item.isCombo && item.comboImages && item.comboImages.length > 0 ? (
                                 (() => {
                                   const imgs = item.comboImages!;
                                   const n = Math.min(imgs.length, 3);

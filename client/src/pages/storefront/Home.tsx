@@ -24,7 +24,14 @@ function getFallbackImage(_category: string): string {
 
 import welcomeAudio from "@assets/ElevenLabs_2026-03-05T15_00_59_Bella_-_Professional,_Bright,_W_1772722955169.mp3";
 
-function ComboImages({ images }: { images: string[] }) {
+function ComboImages({ images, imageUrl }: { images: string[]; imageUrl?: string | null }) {
+  if (imageUrl?.trim()) {
+    return (
+      <div className="relative w-full h-full overflow-hidden">
+        <img src={imageUrl} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
+      </div>
+    );
+  }
   const n = images.length;
   const slotPct = 100 / n;
   const widthPct = n === 1 ? 100 : slotPct + slotPct * 0.45;
@@ -204,13 +211,13 @@ export default function Home() {
                     const comboCategories = combo.includes.slice(0, 3).map(inc => productMap[inc.productId]?.category ?? "Fish");
                     const qtysWithLimits = combo.includes.map(inc => productMap[inc.productId]?.availableQty).filter((q): q is number => q != null);
                     const comboAvailableQty = qtysWithLimits.length > 0 ? Math.min(...qtysWithLimits) : null;
-                    return { id: comboCartId, originalId: combo.id, name: combo.name, price: combo.discountedPrice, category: "Combo", status: "available", unit: combo.weight, imageUrl: null, isArchived: false, updatedAt: new Date(), limitedStockNote: null, sectionId: null, isCombo: true, comboImages, comboCategories, availableQty: comboAvailableQty, comboIncludes: combo.includes.map(inc => ({ productId: inc.productId, quantity: inc.quantity ?? 1, availableQty: productMap[inc.productId]?.availableQty ?? null })) } as any;
+                    return { id: comboCartId, originalId: combo.id, name: combo.name, price: combo.discountedPrice, category: "Combo", status: "available", unit: combo.weight, imageUrl: combo.imageUrl ?? null, isArchived: false, updatedAt: new Date(), limitedStockNote: null, sectionId: null, isCombo: true, comboImages, comboCategories, availableQty: comboAvailableQty, comboIncludes: combo.includes.map(inc => ({ productId: inc.productId, quantity: inc.quantity ?? 1, availableQty: productMap[inc.productId]?.availableQty ?? null })) } as any;
                   };
                   return (
                     <div key={combo.id} className="group relative bg-card flex flex-col transition-all duration-300 cursor-pointer rounded-2xl overflow-hidden border border-border/20">
                       <Link href={`/combo/${combo.id}`}>
                         <div className="relative aspect-[10/7] w-full bg-muted/30 overflow-hidden">
-                          <ComboImages images={comboImages} />
+                                  <ComboImages images={comboImages} imageUrl={combo.imageUrl} />
                           <div className="absolute top-0 left-0 z-10">
                             <div className="relative bg-accent text-white pl-3 pr-5 py-2 shadow-md rounded-tl-xl">
                               <div className="text-[11px] font-bold leading-tight uppercase tracking-wide">Combo</div>
@@ -401,7 +408,7 @@ export default function Home() {
                             <div className="group relative bg-card flex flex-col h-full transition-all duration-300 cursor-pointer">
                               <Link href={`/combo/${combo.id}`}>
                                 <div className="relative aspect-[10/7] w-full bg-muted/30 overflow-hidden mb-3 border border-border/20 rounded-xl">
-                                  <ComboImages images={comboImages} />
+                          <ComboImages images={comboImages} imageUrl={combo.imageUrl} />
                                   <div className="absolute top-0 left-0 z-10">
                                     <div className="relative bg-accent text-white pl-3 pr-5 py-2 shadow-md rounded-tl-xl">
                                       <div className="text-[11px] sm:text-xs font-bold leading-tight uppercase tracking-wide">Combo</div>
@@ -451,7 +458,7 @@ export default function Home() {
                                         originalId: combo.id,
                                         name: combo.name, price: combo.discountedPrice,
                                         category: "Combo", status: "available",
-                                        unit: combo.weight, imageUrl: null,
+                                        unit: combo.weight, imageUrl: combo.imageUrl ?? null,
                                         isArchived: false, updatedAt: new Date(),
                                         limitedStockNote: null, sectionId: null, isCombo: true,
                                         comboImages,
