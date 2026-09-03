@@ -131,12 +131,6 @@ export function CartProvider({ children }: { children: ReactNode }) {
       return;
     }
     if (!isPincodeVerified) {
-      toast({
-        title: "Pincode required",
-        description: "Please enter a valid pincode before adding items to your cart.",
-        variant: "destructive",
-        duration: 3000,
-      });
       openPicker();
       return;
     }
