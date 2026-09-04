@@ -124,7 +124,7 @@ export interface IStorage {
   createUser(user: InsertUser): Promise<User>;
 
   getOrderRequests(): Promise<OrderRequest[]>;
-  getOrdersByPhone(phone: string): Promise<OrderRequest[]>;
+  getOrdersByPhone(phone: string, customerId?: string | null): Promise<OrderRequest[]>;
   getOrderRequest(id: string): Promise<OrderRequest | undefined>;
   createOrderRequest(order: InsertOrderRequest): Promise<OrderRequest>;
   updateOrderRequestStatus(id: string, status: string): Promise<OrderRequest | undefined>;
@@ -137,7 +137,7 @@ export interface IStorage {
   updateCustomerAddress(phone: string, addrId: string, updates: Partial<Omit<CustomerAddress, "id">>): Promise<Customer | undefined>;
   deleteCustomerAddress(phone: string, addrId: string): Promise<Customer | undefined>;
   getAllCustomers(): Promise<Customer[]>;
-  pushOrderToCustomer(phone: string, order: Omit<EmbeddedOrder, "updatedAt">): Promise<void>;
+  pushOrderToCustomer(phone: string, order: Omit<EmbeddedOrder, "updatedAt">, customerId?: string | null): Promise<void>;
   updateCustomerOrderStatus(phone: string, orderId: string, status: string): Promise<void>;
 }
 
@@ -162,8 +162,11 @@ export class MongoStorage implements IStorage {
     return docs.map(toOrder);
   }
 
-  async getOrdersByPhone(phone: string): Promise<OrderRequest[]> {
-    const docs = await getOrderModel().find({ phone }).sort({ createdAt: -1 }).lean();
+  async getOrdersByPhone(phone: string, customerId?: string | null): Promise<OrderRequest[]> {
+    const filters: Record<string, string>[] = [{ phone }];
+    if (customerId) filters.push({ customerId });
+    const query = filters.length === 1 ? filters[0] : { $or: filters };
+    const docs = await getOrderModel().find(query).sort({ createdAt: -1 }).lean();
     return docs.map(toOrder);
   }
 
@@ -341,18 +344,28 @@ export class MongoStorage implements IStorage {
     return docs.map(toCustomer);
   }
 
-  async pushOrderToCustomer(phone: string, order: Omit<EmbeddedOrder, "updatedAt">): Promise<void> {
+  async pushOrderToCustomer(
+    phone: string,
+    order: Omit<EmbeddedOrder, "updatedAt">,
+    customerId?: string | null,
+  ): Promise<void> {
     try {
       const embeddedOrder = { ...order, updatedAt: new Date() };
-      await CustomerDbModel.findOneAndUpdate(
-        { phone },
-        {
-          $push: { orders: embeddedOrder },
-          $set: { updatedAt: new Date() },
-          $setOnInsert: { createdAt: new Date(), addresses: [] },
-        },
-        { upsert: true }
-      );
+      const update = {
+        $push: { orders: embeddedOrder },
+        $set: { updatedAt: new Date() },
+        $setOnInsert: { createdAt: new Date(), addresses: [] },
+      };
+
+      // Address phone numbers can differ from the account phone. Prefer the
+      // account identity for order history, then retain the phone fallback
+      // for legacy/webhook orders that have no customerId.
+      const accountDoc = customerId
+        ? await CustomerDbModel.findByIdAndUpdate(customerId, update, { new: true })
+        : null;
+      if (!accountDoc) {
+        await CustomerDbModel.findOneAndUpdate({ phone }, update, { upsert: true });
+      }
     } catch (err) {
       console.error("Failed to push order to customer document:", err);
     }

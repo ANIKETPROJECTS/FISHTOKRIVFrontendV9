@@ -1487,7 +1487,7 @@ export async function registerRoutes(
         notes: order.notes ?? null,
         total: (order as any).total ?? orderItemsTotal,
         placedAt: order.createdAt,
-      });
+      }, input.customerId);
 
       // Send order confirmation WhatsApp message (fire-and-forget)
       try {
@@ -2294,7 +2294,11 @@ export async function registerRoutes(
   app.get("/api/customer/me/orders", requireCustomer, async (req, res) => {
     const phone = req.session.customerPhone!;
     try {
-      const orders = await storage.getOrdersByPhone(phone);
+      // Match the signed-in account as well as the login phone. A saved
+      // delivery address may intentionally have a different recipient phone,
+      // but its order must remain visible in the same account history.
+      const customer = await CustomerDbModel.findOne({ phone }).select("_id").lean() as any;
+      const orders = await storage.getOrdersByPhone(phone, customer?._id?.toString() ?? null);
 
       // Enrich order items that are missing imageUrl by looking up the product
       // in the hub's products collection using subHubName + productId.
