@@ -888,7 +888,7 @@ export function CartDrawer() {
     } as any;
   };
 
-  const placeOrder = async (useTestUpi = false) => {
+  const placeOrder = async () => {
     const selected = savedAddresses.find(a => a.id === activeAddressId);
     if (!selected) return;
     if (isPreorderCart) {
@@ -934,36 +934,6 @@ export function CartDrawer() {
     // unresolved default of 0, undercharging a real delivery fee.
     if (!isHubReady) {
       toast({ title: "Still loading delivery details, please try again in a moment", variant: "destructive" });
-      return;
-    }
-
-    // Development-only checkout shortcut for testing the complete paid-order
-    // flow without opening Razorpay. It still goes through the same server
-    // order creation, inventory, coupon, timeslot, and delivery-charge checks.
-    if (useTestUpi && import.meta.env.DEV) {
-      setIsProcessingPayment(true);
-      createOrder(
-        {
-          // Leave the payment reference empty: a non-empty reference is
-          // intentionally reserved for a server-verified Razorpay payment.
-          ...buildOrderPayload(selected),
-          paymentMethod: "upi",
-          paymentMode: "upi",
-          paymentStatus: "paid",
-        } as any,
-        {
-          onSuccess: () => {
-            setIsSuccess(true);
-            clearCart();
-            setUseWallet(false);
-            setIsProcessingPayment(false);
-          },
-          onError: (err: any) => {
-            setIsProcessingPayment(false);
-            toast({ title: err?.message || "Could not place test UPI order. Please try again.", variant: "destructive" });
-          },
-        },
-      );
       return;
     }
 
@@ -2124,19 +2094,6 @@ export function CartDrawer() {
                         }
                       </Button>
                     </div>
-                    {import.meta.env.DEV && paymentMethod === "online" && finalTotal > 0 && (
-                      <div className="w-full mt-3">
-                        <button
-                          type="button"
-                          onClick={() => placeOrder(true)}
-                          disabled={isPending || isProcessingPayment || !customer || savedAddresses.length === 0 || !isHubReady}
-                          className="w-full h-10 rounded-full border border-dashed border-amber-400 bg-amber-50 text-amber-800 text-xs font-semibold hover:bg-amber-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                          data-testid="button-test-upi"
-                        >
-                          Test UPI — Mark as Paid (Development)
-                        </button>
-                      </div>
-                    )}
                     {!customer && (
                       <p className="text-xs text-center text-muted-foreground mt-2">Please log in to place an order</p>
                     )}
