@@ -82,7 +82,10 @@ function toOrder(doc: any): OrderRequest {
     timeslotLabel: doc.timeslotLabel ?? null,
     instantDeliveryCharge: doc.instantDeliveryCharge ?? null,
     slotCharge: doc.slotCharge ?? 0,
-    deliveryCharge: doc.deliveryCharge ?? 0,
+    // Keep null when no explicit override exists so the storefront can fall
+    // back to the authoritative slotCharge. A real 0 remains an intentional
+    // free-delivery override.
+    deliveryCharge: doc.deliveryCharge ?? null,
     discount: doc.discount ?? 0,
     extraDiscount: doc.extraDiscount ?? 0,
     extraDiscountType: doc.extraDiscountType ?? null,

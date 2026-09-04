@@ -145,10 +145,11 @@ function getOrderTotal(order: OrderRequest) {
   if (order.total != null) return order.total;
   const items: OrderItem[] = Array.isArray(order.items) ? order.items as OrderItem[] : [];
   const subtotal = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
-  const slotCharge = order.slotCharge ?? 0;
-  const deliveryCharge = order.deliveryCharge ?? 0;
+  const deliveryCharge = order.deliveryCharge != null
+    ? order.deliveryCharge
+    : (order.slotCharge ?? 0);
   const totalDiscount = (order.discount ?? 0) + (order.extraDiscount ?? 0);
-  return subtotal + slotCharge + deliveryCharge - totalDiscount;
+  return subtotal + deliveryCharge - totalDiscount;
 }
 
 const TRACK_STEPS = [

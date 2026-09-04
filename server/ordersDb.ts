@@ -41,6 +41,8 @@ const orderSchema = new mongoose.Schema(
     subtotal: { type: Number, default: 0 },
     discount: { type: Number, default: 0 },
     slotCharge: { type: Number, default: 0 },
+    // Optional admin override. When absent, storefronts should use slotCharge.
+    deliveryCharge: { type: Number, default: null },
     total: { type: Number, default: 0 },
     deliveryType: { type: String, default: "delivery" },
     address: { type: String, required: true },
