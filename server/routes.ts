@@ -1210,17 +1210,26 @@ export async function registerRoutes(
       const pendingCheckout = input.razorpayOrderId
         ? await getPendingCheckoutModel().findOne({ razorpayOrderId: input.razorpayOrderId }).lean() as any
         : null;
-      const isFtwUpiPayment = isFtwStorefrontOrder({
-        source: input.source,
-        razorpayOrderId: input.razorpayOrderId,
-      }) && String(input.paymentMode ?? "").toLowerCase() === "upi";
-      const ftwReservation = pendingCheckout?.inventoryReservation;
+      const testUpiOperationId = isDevelopmentTestUpi
+        ? String(
+            input.payments?.find((payment: any) => payment.mode === "upi" && payment.reference)?.reference ?? "",
+          )
+        : null;
+      const isFtwUpiPayment = (
+        isFtwStorefrontOrder({
+          source: input.source,
+          razorpayOrderId: input.razorpayOrderId,
+        }) ||
+        isDevelopmentTestUpi
+      ) && String(input.paymentMode ?? "").toLowerCase() === "upi";
+      let ftwReservation = pendingCheckout?.inventoryReservation;
 
       // FTW UPI stock is reserved at payment initiation. Never fall back to
       // the generic order-create deduction path, because that can double-deduct
       // or allow a paid order to be created without a reservation.
       if (
         isFtwUpiPayment &&
+        !isDevelopmentTestUpi &&
         (!ftwReservation || ftwReservation.status !== "deducted")
       ) {
         return res.status(409).json({
@@ -1423,6 +1432,41 @@ export async function registerRoutes(
         } catch (couponPreflightErr) {
           console.error("Coupon pre-flight check error:", couponPreflightErr);
           return res.status(500).json({ message: "Could not verify coupon. Please try again." });
+        }
+      }
+
+      // FIFO inventory deduction if hubDbName is provided (atomic per-batch to prevent overselling)
+      // The development test UPI uses the same FTW reservation path as Razorpay.
+      // This is deliberately done after checkout validations and immediately before
+      // persistence so a test order cannot touch the legacy inventoryBatches path.
+      if (isDevelopmentTestUpi && !ftwReservation) {
+        if (!input.hubDbName || !testUpiOperationId) {
+          return res.status(400).json({ message: "Test UPI checkout is missing inventory details." });
+        }
+        try {
+          const hub = await getHubModels(input.hubDbName);
+          ftwReservation = await reserveFtwInventory({
+            hub,
+            operationId: testUpiOperationId,
+            hubDbName: input.hubDbName,
+            items: input.items,
+          });
+          await getPendingCheckoutModel().findOneAndUpdate(
+            { razorpayOrderId: testUpiOperationId },
+            {
+              razorpayOrderId: testUpiOperationId,
+              orderPayload: input,
+              inventoryReservation: ftwReservation,
+            },
+            { upsert: true, new: true },
+          );
+        } catch (inventoryErr: any) {
+          console.error("[FTW inventory] Test UPI reservation failed:", inventoryErr);
+          return res.status(inventoryErr instanceof FtwInventoryError ? inventoryErr.statusCode : 500).json({
+            message: inventoryErr instanceof FtwInventoryError
+              ? inventoryErr.message
+              : "Could not reserve inventory for the test order.",
+          });
         }
       }
 
@@ -1806,7 +1850,7 @@ export async function registerRoutes(
               ftwInventoryStatus: "deducted",
               ftwInventoryTrigger: "upi_initiated",
               ftwInventoryProcessedAt: new Date(),
-              ftwInventoryOperationId: input.razorpayOrderId,
+              ftwInventoryOperationId: input.razorpayOrderId ?? testUpiOperationId,
             }
           : {}),
       };
@@ -1828,23 +1872,24 @@ export async function registerRoutes(
                 ftwInventoryStatus: "deducted",
                 ftwInventoryTrigger: "upi_initiated",
                 ftwInventoryProcessedAt: new Date(),
-                ftwInventoryOperationId: input.razorpayOrderId,
+                ftwInventoryOperationId: input.razorpayOrderId ?? testUpiOperationId,
               }
             : {}),
         },
       });
 
-      if (ftwReservation && input.razorpayOrderId && input.hubDbName) {
+      const ftwOperationId = input.razorpayOrderId ?? testUpiOperationId;
+      if (ftwReservation && ftwOperationId && input.hubDbName) {
         try {
           const hub = await getHubModels(input.hubDbName);
           await finalizeFtwInventory({
             hub,
-            operationId: input.razorpayOrderId,
+            operationId: ftwOperationId,
             orderMongoId: order.id,
             orderPublicId: generatedOrderId,
           });
           await getPendingCheckoutModel().updateOne(
-            { razorpayOrderId: input.razorpayOrderId },
+            { razorpayOrderId: ftwOperationId },
             {
               $set: {
                 "inventoryReservation.status": "deducted",
@@ -1852,7 +1897,7 @@ export async function registerRoutes(
               },
             },
           );
-          await getPendingCheckoutModel().deleteOne({ razorpayOrderId: input.razorpayOrderId });
+          await getPendingCheckoutModel().deleteOne({ razorpayOrderId: ftwOperationId });
         } catch (finalizeErr) {
           // The stock movement already exists and the order is marked as
           // deducted. Keep the pending record for reconciliation rather than
