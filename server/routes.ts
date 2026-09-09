@@ -1184,6 +1184,21 @@ export async function registerRoutes(
   app.post(api.orders.create.path, async (req, res) => {
     try {
       const input = api.orders.create.input.parse(req.body);
+      const isDevelopmentTestUpi = input.testUpi === true;
+      if (isDevelopmentTestUpi) {
+        if (process.env.NODE_ENV === "production") {
+          return res.status(404).json({ message: "Not found" });
+        }
+        if (!req.session?.customerPhone) {
+          return res.status(401).json({ message: "Sign in is required for the test payment" });
+        }
+        if (
+          input.source !== "online" ||
+          String(input.paymentMode ?? "").toLowerCase() !== "upi"
+        ) {
+          return res.status(400).json({ message: "Invalid test UPI request" });
+        }
+      }
       // A captured payment must never disappear just because inventory changed
       // between checkout and webhook delivery. The webhook sets this internal
       // header so we record a paid order for admin resolution without deducting
@@ -1672,7 +1687,7 @@ export async function registerRoutes(
         orderId: string;
         amount: number;
       } | null = null;
-      if (input.razorpayOrderId || upiTransactionId) {
+      if (!isDevelopmentTestUpi && (input.razorpayOrderId || upiTransactionId)) {
         if (!input.razorpayOrderId || !upiTransactionId) {
           return res.status(400).json({ message: "Incomplete Razorpay payment details" });
         }

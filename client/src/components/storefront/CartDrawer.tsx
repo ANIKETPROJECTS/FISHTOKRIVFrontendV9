@@ -906,7 +906,7 @@ export function CartDrawer() {
     }
   };
 
-  const placeOrder = async () => {
+  const placeOrder = async (testUpi = false) => {
     const selected = savedAddresses.find(a => a.id === activeAddressId);
     if (!selected) return;
     if (isPreorderCart) {
@@ -974,6 +974,35 @@ export function CartDrawer() {
           toast({ title: err?.message || "Could not place order. Please try again.", variant: "destructive" });
         },
       });
+      return;
+    }
+
+    // Development-only payment shortcut. The server applies the same order
+    // validation and records a paid UPI payment, but never opens Razorpay.
+    if (testUpi) {
+      const testPaymentId = `TEST_UPI_${Date.now()}`;
+      setIsProcessingPayment(true);
+      createOrder(
+        {
+          ...buildOrderPayload(selected, testPaymentId),
+          testUpi: true,
+        },
+        {
+          onSuccess: () => {
+            setIsSuccess(true);
+            clearCart();
+            setUseWallet(false);
+            setIsProcessingPayment(false);
+          },
+          onError: (err: any) => {
+            setIsProcessingPayment(false);
+            toast({
+              title: err?.message || "Could not place test order. Please try again.",
+              variant: "destructive",
+            });
+          },
+        },
+      );
       return;
     }
 
@@ -2080,6 +2109,18 @@ export function CartDrawer() {
                             </div>
                             <span className="text-sm font-medium text-foreground">UPI</span>
                           </button>
+                        {import.meta.env.DEV && (
+                          <button
+                            type="button"
+                            onClick={() => placeOrder(true)}
+                            disabled={isPending || isProcessingPayment || !customer || savedAddresses.length === 0 || !isHubReady}
+                            className="w-full rounded-xl border border-dashed border-amber-400 bg-amber-50 px-3 py-2 text-left text-xs text-amber-800 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                            data-testid="button-test-upi"
+                          >
+                            <span className="font-semibold">Test UPI — Mark as Paid</span>
+                            <span className="block text-[10px] text-amber-700/80">Development only — skips Razorpay</span>
+                          </button>
+                        )}
                       </div>
                     </div>
                     )}
