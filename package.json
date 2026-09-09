@@ -8,7 +8,8 @@
     "build": "npx tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
-    "test:payments": "node --import tsx --test server/razorpayPayment.test.ts"
+    "test:payments": "node --import tsx --test server/razorpayPayment.test.ts",
+    "test:inventory": "node --import tsx --test server/ftwInventory.test.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

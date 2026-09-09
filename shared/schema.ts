@@ -184,6 +184,10 @@ export type OrderRequest = {
   superHubId?: string | null;
   subHubId?: string | null;
   subHubName?: string | null;
+  ftwInventoryStatus?: string | null;
+  ftwInventoryTrigger?: string | null;
+  ftwInventoryProcessedAt?: Date | null;
+  ftwInventoryOperationId?: string | null;
 };
 
 export type DeliveryAddressDetail = {

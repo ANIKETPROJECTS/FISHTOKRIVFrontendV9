@@ -10,3 +10,4 @@
 - [Preorder date-specific slots](preorder-date-slots.md) — preorder checkout selects a future date and filters slots by configured active weekdays.
 - [Same-day slot cutoff](same-day-slot-cutoff.md) — enforce the 30-minute cutoff server-side in India time; stale carts can submit after the UI hides a slot.
 - [Cross-channel inventory mismatch](inventory-channel-mismatch.md) — FTS and FTW must share one atomic stock field; external batches and storefront inventoryBatches are not interchangeable.
+- [FTW reservation boundary](ftw-reservation.md) — FTW UPI reserves shared POS batches before Razorpay opens; generic order creation must never deduct that flow again.

@@ -12,6 +12,18 @@ const inventoryBatchSchema = new mongoose.Schema({
   remainingTime: { type: String, default: null },
 });
 
+const externalBatchSchema = new mongoose.Schema(
+  {
+    batchNumber: { type: String, default: "" },
+    quantity: { type: Number, default: 0 },
+    receivedDate: { type: Date, default: null },
+    entryDate: { type: Date, default: null },
+    expiryDate: { type: Date, default: null },
+    createdAt: { type: Date, default: null },
+  },
+  { strict: false },
+);
+
 const productSchema = new mongoose.Schema({
   name: { type: String, required: true },
   category: { type: String, required: true },
@@ -45,6 +57,9 @@ const productSchema = new mongoose.Schema({
   },
   couponIds: { type: [mongoose.Schema.Types.ObjectId], default: [] },
   inventoryBatches: { type: [inventoryBatchSchema], default: [] },
+  // POS/admin inventory source. Keep this separate from the legacy storefront
+  // inventoryBatches field; FTW reservations use this shared array.
+  batches: { type: [externalBatchSchema], default: undefined },
   recipes: [{
     title: { type: String },
     description: { type: String },
@@ -173,6 +188,30 @@ const couponLocationUsageSchema = new mongoose.Schema({
   maxUsageLimit: { type: Number, default: null }, // null = no location-level cap
 });
 
+const inventoryMovementSchema = new mongoose.Schema(
+  {
+    type: { type: String, required: true },
+    productId: { type: String, required: true },
+    productName: { type: String, default: "" },
+    unit: { type: String, default: "" },
+    change: { type: Number, required: true },
+    balance: { type: Number, required: true },
+    orderId: { type: String, required: true },
+    orderRef: { type: String, default: "" },
+    reservationId: { type: String, default: null },
+    batchNumbers: { type: String, default: "" },
+    batchAllocations: { type: mongoose.Schema.Types.Mixed, default: [] },
+    subReason: { type: String, default: "" },
+    expiryDate: { type: Date, default: null },
+    createdAt: { type: Date, default: Date.now },
+  },
+  {
+    collection: "inventory_movements",
+    versionKey: false,
+    strict: false,
+  },
+);
+
 export interface HubModels {
   Product: mongoose.Model<any>;
   Section: mongoose.Model<any>;
@@ -184,6 +223,7 @@ export interface HubModels {
   Coupon: mongoose.Model<any>;
   CouponUsage: mongoose.Model<any>;
   CouponLocationUsage: mongoose.Model<any>;
+  InventoryMovement: mongoose.Model<any>;
 }
 
 export async function getHubModels(dbName: string): Promise<HubModels> {
@@ -210,5 +250,6 @@ export async function getHubModels(dbName: string): Promise<HubModels> {
     Coupon: getModel("Coupon", couponSchema),
     CouponUsage: getModel("CouponUsage", couponUsageSchema),
     CouponLocationUsage: getModel("CouponLocationUsage", couponLocationUsageSchema),
+    InventoryMovement: getModel("InventoryMovement", inventoryMovementSchema),
   };
 }
