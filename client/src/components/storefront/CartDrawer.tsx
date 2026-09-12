@@ -906,6 +906,43 @@ export function CartDrawer() {
     }
   };
 
+  // pagehide fires when the whole tab/window is closed, so the normal
+  // Razorpay ondismiss callback is not the only abandoned-payment signal.
+  // The server records this signal and waits briefly before re-checking
+  // Razorpay, protecting a delayed external UPI capture.
+  useEffect(() => {
+    const handlePageHide = () => {
+      const razorpayOrderId = pendingRzpOrderIdRef.current;
+      if (
+        !razorpayOrderId ||
+        paymentSucceededRef.current ||
+        returningFromUpiRef.current
+      ) {
+        return;
+      }
+
+      const body = JSON.stringify({
+        razorpayOrderId,
+        reason: "browser_closed",
+      });
+      const blob = new Blob([body], { type: "application/json" });
+
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon("/api/razorpay/restore-ftw-inventory", blob);
+      } else {
+        void fetch("/api/razorpay/restore-ftw-inventory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+          keepalive: true,
+        });
+      }
+    };
+
+    window.addEventListener("pagehide", handlePageHide);
+    return () => window.removeEventListener("pagehide", handlePageHide);
+  }, []);
+
   const placeOrder = async () => {
     const selected = savedAddresses.find(a => a.id === activeAddressId);
     if (!selected) return;

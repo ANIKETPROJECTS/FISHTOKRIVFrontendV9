@@ -652,10 +652,18 @@ export async function registerRoutes(
   if (razorpay) {
     const reconcileFtwReservations = async () => {
       try {
-        const cutoff = new Date(Date.now() - 30 * 60 * 1000);
+        const now = Date.now();
+        const staleCutoff = new Date(now - 30 * 60 * 1000);
+        // A browser-close signal gets a shorter grace period than a checkout
+        // that simply went stale. This allows a delayed UPI capture to arrive
+        // before stock is restored, while still releasing abandoned stock soon.
+        const browserClosedCutoff = new Date(now - 5 * 60 * 1000);
         const staleReservations = await getPendingCheckoutModel().find({
-          createdAt: { $lt: cutoff },
           "inventoryReservation.status": "deducted",
+          $or: [
+            { createdAt: { $lt: staleCutoff } },
+            { "inventoryReservation.browserClosedAt": { $lt: browserClosedCutoff } },
+          ],
         }).limit(50).lean() as any[];
 
         for (const pending of staleReservations) {
@@ -679,7 +687,9 @@ export async function registerRoutes(
                 $set: {
                   "inventoryReservation.status": "restored",
                   "inventoryReservation.restoredAt": new Date(),
-                  "inventoryReservation.restoreReason": "payment_expired",
+                  "inventoryReservation.restoreReason": pending.inventoryReservation.browserClosedAt
+                    ? "browser_closed"
+                    : "payment_expired",
                 },
               },
             );
@@ -847,6 +857,26 @@ export async function registerRoutes(
         return res.json({
           restored: false,
           status: pending.inventoryReservation.status,
+        });
+      }
+
+      // A tab close cannot tell us whether the customer was still completing
+      // an external UPI handoff. Mark it for the short reconciliation grace
+      // period instead of restoring immediately; reconciliation re-checks
+      // Razorpay before touching stock.
+      if (reason === "browser_closed") {
+        await PendingCheckout.updateOne(
+          { razorpayOrderId },
+          {
+            $set: {
+              "inventoryReservation.browserClosedAt": new Date(),
+              "inventoryReservation.browserCloseReason": reason,
+            },
+          },
+        );
+        return res.status(202).json({
+          restored: false,
+          status: "pending_reconciliation",
         });
       }
 
