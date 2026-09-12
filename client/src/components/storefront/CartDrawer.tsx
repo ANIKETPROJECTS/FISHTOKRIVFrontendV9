@@ -943,6 +943,25 @@ export function CartDrawer() {
     return () => window.removeEventListener("pagehide", handlePageHide);
   }, []);
 
+  // Keep the pending Razorpay checkout leased on the server. This is the
+  // fallback when the browser is killed before it can deliver pagehide.
+  useEffect(() => {
+    const sendCheckoutHeartbeat = () => {
+      const razorpayOrderId = pendingRzpOrderIdRef.current;
+      if (!razorpayOrderId || paymentSucceededRef.current) return;
+
+      void fetch("/api/razorpay/checkout-heartbeat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ razorpayOrderId }),
+        keepalive: true,
+      }).catch(() => {});
+    };
+
+    const heartbeatTimer = window.setInterval(sendCheckoutHeartbeat, 10_000);
+    return () => window.clearInterval(heartbeatTimer);
+  }, []);
+
   const placeOrder = async () => {
     const selected = savedAddresses.find(a => a.id === activeAddressId);
     if (!selected) return;

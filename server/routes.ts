@@ -658,11 +658,16 @@ export async function registerRoutes(
         // that simply went stale. This allows a delayed UPI capture to arrive
         // before stock is restored, while still releasing abandoned stock soon.
         const browserClosedCutoff = new Date(now - 5 * 60 * 1000);
+        const heartbeatCutoff = new Date(now - 5 * 60 * 1000);
         const staleReservations = await getPendingCheckoutModel().find({
           "inventoryReservation.status": "deducted",
           $or: [
             { createdAt: { $lt: staleCutoff } },
             { "inventoryReservation.browserClosedAt": { $lt: browserClosedCutoff } },
+            {
+              "inventoryReservation.lastClientSeenAt": { $lt: heartbeatCutoff },
+              createdAt: { $lt: new Date(now - 2 * 60 * 1000) },
+            },
           ],
         }).limit(50).lean() as any[];
 
@@ -674,6 +679,24 @@ export async function registerRoutes(
               ["captured", "authorized"].includes(String(payment.status).toLowerCase()),
             );
             if (successfulPayment) continue;
+
+            const razorpayOrder = await razorpay.orders.fetch(operationId) as any;
+            const razorpayOrderStatus = String(razorpayOrder?.status ?? "").toLowerCase();
+            const hasFailedPayment = (payments?.items ?? []).some((payment: any) =>
+              ["failed", "refunded"].includes(String(payment.status).toLowerCase()),
+            );
+            const isNormalStaleCheckout =
+              new Date(pending.createdAt).getTime() < staleCutoff.getTime();
+            // An "attempted" order may still be completing an external UPI
+            // handoff. Give it the full stale window unless Razorpay has
+            // explicitly reported failure.
+            if (
+              razorpayOrderStatus === "attempted" &&
+              !hasFailedPayment &&
+              !isNormalStaleCheckout
+            ) {
+              continue;
+            }
 
             const hub = await getHubModels(String(pending.orderPayload?.hubDbName ?? ""));
             await restoreFtwInventory({
@@ -687,7 +710,10 @@ export async function registerRoutes(
                 $set: {
                   "inventoryReservation.status": "restored",
                   "inventoryReservation.restoredAt": new Date(),
-                  "inventoryReservation.restoreReason": pending.inventoryReservation.browserClosedAt
+                  "inventoryReservation.restoreReason": (
+                    pending.inventoryReservation.browserClosedAt ||
+                    pending.inventoryReservation.lastClientSeenAt
+                  )
                     ? "browser_closed"
                     : "payment_expired",
                 },
@@ -769,6 +795,7 @@ export async function registerRoutes(
                   inventoryReservation: {
                     ...reservation,
                     processedAt: reservation.processedAt,
+                    lastClientSeenAt: new Date(),
                   },
                 },
               },
@@ -915,6 +942,54 @@ export async function registerRoutes(
           ? error.message
           : "Could not restore the payment reservation yet.",
       });
+    }
+  });
+
+  // Keep a server-side lease while the checkout page is alive. A tab can be
+  // terminated before pagehide/sendBeacon runs, so reconciliation also uses
+  // this timestamp to find abandoned reservations.
+  app.post("/api/razorpay/checkout-heartbeat", async (req, res) => {
+    const razorpayOrderId = String(req.body?.razorpayOrderId ?? "").trim();
+    if (!razorpayOrderId) return res.status(400).json({ message: "Razorpay order ID is required" });
+    if (!req.session?.customerPhone) {
+      return res.status(401).json({ message: "Sign in is required" });
+    }
+
+    try {
+      const PendingCheckout = getPendingCheckoutModel();
+      const pending = await PendingCheckout.findOne({ razorpayOrderId }).lean() as any;
+      if (!pending?.inventoryReservation) {
+        return res.json({ ok: true, status: "not_pending" });
+      }
+
+      const pendingCustomerId = String(pending.orderPayload?.customerId ?? "");
+      if (pendingCustomerId) {
+        const sessionCustomer = await CustomerDbModel.findOne({
+          phone: req.session.customerPhone,
+        }).select("_id").lean() as any;
+        if (!sessionCustomer || String(sessionCustomer._id) !== pendingCustomerId) {
+          return res.status(403).json({ message: "Payment does not belong to this account" });
+        }
+      } else {
+        const sessionPhone = String(req.session.customerPhone).replace(/\D/g, "").slice(-10);
+        const orderPhone = String(pending.orderPayload?.phone ?? "").replace(/\D/g, "").slice(-10);
+        if (!sessionPhone || !orderPhone || sessionPhone !== orderPhone) {
+          return res.status(403).json({ message: "Payment does not belong to this account" });
+        }
+      }
+
+      if (pending.inventoryReservation.status !== "deducted") {
+        return res.json({ ok: true, status: pending.inventoryReservation.status });
+      }
+
+      await PendingCheckout.updateOne(
+        { razorpayOrderId },
+        { $set: { "inventoryReservation.lastClientSeenAt": new Date() } },
+      );
+      return res.json({ ok: true, status: "alive" });
+    } catch (error) {
+      console.error(`[FTW inventory] Checkout heartbeat failed for ${razorpayOrderId}:`, error);
+      return res.status(500).json({ message: "Could not update checkout heartbeat" });
     }
   });
 
