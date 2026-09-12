@@ -34,6 +34,7 @@ The storefront must treat a verified successful Razorpay result as the only auth
 ### Client changes (`CartDrawer.tsx`)
 - Calls `buildOrderPayload(selected)` (no paymentId) before the Razorpay modal, sends result as `orderPayload` alongside `amount` to `/api/razorpay/create-order`.
 - Both `createOrder` call sites (modal handler + UPI-resume visibilitychange) now spread `razorpayOrderId: order_id` (or `razorpayOrderId: orderId`) into the payload for deduplication.
+- A `pagehide` beacon marks a pending checkout when the whole tab closes. The server waits five minutes, re-checks Razorpay, and restores unpaid reservations; the normal 30-minute stale sweep remains the fallback.
 
 ## Setup required
 1. Razorpay Dashboard → Settings → Webhooks → add URL: `https://<domain>/api/webhooks/razorpay`
@@ -42,3 +43,6 @@ The storefront must treat a verified successful Razorpay result as the only auth
 
 **Why:**
 Without this, any browser/network interruption after payment success silently loses the order. Razorpay retries webhooks for 24 hours, so a server restart during that window will still recover the order.
+
+**Browser-close safety:**
+The pagehide signal must mark the reservation rather than restore stock immediately. A delayed UPI capture can arrive after the tab disappears, so reconciliation must check Razorpay first and only restore unpaid reservations.
