@@ -363,8 +363,6 @@ export const insertOrderRequestSchema = z.object({
   dueAmount: z.number().nullable().optional(),
   paymentStatus: z.string().nullable().optional(),
   razorpayOrderId: z.string().nullable().optional(),
-  // Development-only checkout helper. The server rejects this in production.
-  testUpi: z.boolean().optional(),
 });
 
 export const insertUserSchema = z.object({
