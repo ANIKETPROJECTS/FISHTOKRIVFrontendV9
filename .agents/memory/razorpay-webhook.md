@@ -34,7 +34,7 @@ The storefront must treat a verified successful Razorpay result as the only auth
 ### Client changes (`CartDrawer.tsx`)
 - Calls `buildOrderPayload(selected)` (no paymentId) before the Razorpay modal, sends result as `orderPayload` alongside `amount` to `/api/razorpay/create-order`.
 - Both `createOrder` call sites (modal handler + UPI-resume visibilitychange) now spread `razorpayOrderId: order_id` (or `razorpayOrderId: orderId`) into the payload for deduplication.
-- A `pagehide` beacon marks a pending checkout when the whole tab closes. The server waits five minutes, re-checks Razorpay, and restores unpaid reservations; the normal 30-minute stale sweep remains the fallback.
+- A `pagehide` beacon requests immediate restoration when the whole tab closes. The server re-checks Razorpay first and preserves successful payments; the heartbeat and five-minute reconciliation remain fallbacks when the browser signal is not delivered.
 - While the payment screen is open, a server heartbeat updates `lastClientSeenAt` every 10 seconds. Reconciliation uses the missing lease as a fallback when the browser dies before `pagehide`.
 
 ## Setup required
@@ -46,4 +46,4 @@ The storefront must treat a verified successful Razorpay result as the only auth
 Without this, any browser/network interruption after payment success silently loses the order. Razorpay retries webhooks for 24 hours, so a server restart during that window will still recover the order.
 
 **Browser-close safety:**
-The pagehide signal must mark the reservation rather than restore stock immediately. A delayed UPI capture can arrive after the tab disappears, so reconciliation must check Razorpay first and only restore unpaid reservations.
+The pagehide signal requests immediate restoration, but the server must check Razorpay first so a payment already captured while the tab disappeared keeps its reservation. If the signal is lost, the heartbeat and reconciliation fallbacks handle the abandoned reservation.
