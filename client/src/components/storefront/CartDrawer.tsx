@@ -908,8 +908,7 @@ export function CartDrawer() {
 
   // pagehide fires when the whole tab/window is closed, so the normal
   // Razorpay ondismiss callback is not the only abandoned-payment signal.
-  // The server records this signal and waits briefly before re-checking
-  // Razorpay, protecting a delayed external UPI capture.
+  // The server checks Razorpay and restores immediately if no payment exists.
   useEffect(() => {
     const handlePageHide = () => {
       const razorpayOrderId = pendingRzpOrderIdRef.current;
