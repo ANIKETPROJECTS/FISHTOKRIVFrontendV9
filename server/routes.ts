@@ -137,7 +137,6 @@ async function sendWhatsApp(templateName: string, phone: string, csvVariables: s
   const apiKey = process.env.ADMARK_API_KEY;
   const phoneNumberId = process.env.ADMARK_PHONE_NUMBER_ID;
   if (!apiKey || !phoneNumberId) {
-    console.warn("[WhatsApp] ADMARK_API_KEY or ADMARK_PHONE_NUMBER_ID not set — skipping");
     return;
   }
   const destination = `91${phone}`;
@@ -155,7 +154,6 @@ async function sendWhatsApp(templateName: string, phone: string, csvVariables: s
     });
     const text = await res.text();
     if (!res.ok) console.error(`[WhatsApp] ${templateName} failed ${res.status}:`, text);
-    else console.log(`[WhatsApp] ${templateName} → ${destination}`);
   } catch (err) {
     console.error(`[WhatsApp] ${templateName} error:`, err);
   }
@@ -315,8 +313,8 @@ export async function registerRoutes(
           try {
             const hub = await getHubModels(h.dbName);
             pincodes = await hub.Pincode.find({ isActive: { $ne: false } }).lean();
-          } catch (err) {
-            console.warn(`[hubs/sub] Could not read legacy pincodes for ${h.dbName}:`, err);
+          } catch {
+            // Legacy pincode data is optional; the admin configuration remains authoritative.
           }
         }
         return ({
@@ -621,10 +619,6 @@ export async function registerRoutes(
       })
     : null;
 
-  if (!razorpay) {
-    console.warn("[Razorpay] RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set — payment routes disabled");
-  }
-
   const fetchVerifiedRazorpayPayment = async (
     razorpayOrderId: string,
     razorpayPaymentId: string,
@@ -718,12 +712,12 @@ export async function registerRoutes(
                 },
               },
             );
-          } catch (error) {
-            console.error(`[FTW inventory] Reconciliation failed for ${operationId}:`, error);
+          } catch {
+            // Retry on the next reconciliation pass.
           }
         }
-      } catch (error) {
-        console.error("[FTW inventory] Reservation reconciliation sweep failed:", error);
+      } catch {
+        // Retry on the next reconciliation pass.
       }
     };
     const reconciliationTimer = setInterval(() => void reconcileFtwReservations(), 5 * 60 * 1000);
@@ -799,7 +793,6 @@ export async function registerRoutes(
                 },
               },
             );
-            console.log(`[FTW inventory] Reserved stock for UPI initiation ${order.id}`);
           }
         } catch (storeErr) {
           console.error("[Razorpay] Failed to store pending checkout or reserve FTW inventory:", storeErr);
@@ -966,8 +959,7 @@ export async function registerRoutes(
         { $set: { "inventoryReservation.lastClientSeenAt": new Date() } },
       );
       return res.json({ ok: true, status: "alive" });
-    } catch (error) {
-      console.error(`[FTW inventory] Checkout heartbeat failed for ${razorpayOrderId}:`, error);
+    } catch {
       return res.status(500).json({ message: "Could not update checkout heartbeat" });
     }
   });
@@ -983,7 +975,6 @@ export async function registerRoutes(
   app.post("/api/webhooks/razorpay", async (req, res) => {
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
     if (!webhookSecret) {
-      console.error("[Razorpay webhook] RAZORPAY_WEBHOOK_SECRET not configured — webhook disabled");
       return res.status(500).json({ message: "Webhook not configured" });
     }
 
@@ -997,7 +988,6 @@ export async function registerRoutes(
       .update(rawBody)
       .digest("hex");
     if (expectedSig !== signature) {
-      console.warn("[Razorpay webhook] Signature mismatch — possible spoofed request");
       return res.status(400).json({ message: "Invalid signature" });
     }
 
@@ -1125,8 +1115,6 @@ export async function registerRoutes(
     const razorpayOrderId: string = payment.order_id;
     const amountPaid: number = (payment.amount ?? 0) / 100; // Razorpay sends paise
 
-    console.log(`[Razorpay webhook] payment.captured: payment_id=${razorpayPaymentId} order_id=${razorpayOrderId} amount=₹${amountPaid}`);
-
     try {
       // Idempotency: skip if a FishTokri order already exists for this payment
       const OrderModel = getOrderModel();
@@ -1155,9 +1143,6 @@ export async function registerRoutes(
               },
             },
           );
-          console.log(`[Razorpay webhook] Repaired FTW payment metadata for ${razorpayPaymentId}`);
-        } else {
-          console.log(`[Razorpay webhook] Non-FTW order already exists for payment ${razorpayPaymentId} — skipping`);
         }
         return res.status(200).json({ message: "Already processed" });
       }
@@ -1166,7 +1151,6 @@ export async function registerRoutes(
       const PendingCheckout = getPendingCheckoutModel();
       const pending = await PendingCheckout.findOne({ razorpayOrderId }).lean() as any;
       if (!pending?.orderPayload) {
-        console.warn(`[Razorpay webhook] No pending checkout found for Razorpay order ${razorpayOrderId} — cannot reconstruct order`);
         return res.status(200).json({ message: "No pending checkout" });
       }
 
@@ -1198,11 +1182,7 @@ export async function registerRoutes(
       });
 
       if (createRes.ok) {
-        const created = await createRes.json() as any;
-        console.log(
-          `[Razorpay webhook] Order created: orderId=${created.orderId ?? created.id} ` +
-          `for payment ${razorpayPaymentId}; inventory review required`,
-        );
+        await createRes.text();
         // Clean up the pending checkout
         await PendingCheckout.deleteOne({ razorpayOrderId });
       } else {
@@ -1434,11 +1414,9 @@ export async function registerRoutes(
               },
               { new: true },
             ).lean();
-            console.log(`[order:dedupe] Repaired FTW payment metadata for ${verifiedPayment.id}`);
             return res.status(200).json({ ...repaired, id: String(existing._id) });
           }
 
-          console.warn(`[order:dedupe] Duplicate order-create request for razorpay reference=${upiReference} — returning existing order ${existing.orderId ?? existing._id}`);
           return res.status(200).json({ ...existing, id: String(existing._id) });
         }
       }
@@ -1699,12 +1677,6 @@ export async function registerRoutes(
           if (!pincodeConfig) {
             // No authoritative config found (unknown pincode, hub/dbName mismatch, or missing
             // pincode on the order) — we silently keep the client-submitted slotCharge below.
-            // Log it loudly so a $0 charge slipping through is visible in server logs
-            // immediately rather than being discovered later as missing revenue.
-            console.warn(
-              `[order:slotCharge] No pincode config match — keeping client-submitted slotCharge=${clientSlotCharge} ` +
-              `(pincode=${pincode}, hub=${input.hubDbName}, foundSubHub=${!!subHubForCharge})`
-            );
           }
           if (pincodeConfig) {
             const baseCharge = pincodeConfig.charge ?? 0;
@@ -1717,11 +1689,6 @@ export async function registerRoutes(
               } catch { /* non-fatal — fall back to base charge only */ }
             }
             const authoritativeCharge = baseCharge + extraCharge;
-            if (authoritativeCharge !== clientSlotCharge) {
-              console.warn(
-                `[order:slotCharge] Overriding client-submitted slotCharge=${clientSlotCharge} with authoritative ${authoritativeCharge} (pincode=${pincode}, hub=${input.hubDbName})`
-              );
-            }
             slotCharge = authoritativeCharge;
           }
         } catch (chargeLookupErr) {
@@ -2015,7 +1982,6 @@ export async function registerRoutes(
           await CustomerDbModel.findByIdAndUpdate(input.customerId, {
             $inc: { walletBalance: -walletUsed },
           });
-          console.log(`[Wallet] Deducted ₹${walletUsed} from customer ${input.customerId}`);
         } catch (walletErr) {
           console.error("[Wallet] Deduction error:", walletErr);
         }
@@ -2656,14 +2622,11 @@ export async function registerRoutes(
       });
 
       const responseText = await response.text();
-      console.log(`[OTP] Admark response ${response.status}:`, responseText);
-
       if (!response.ok) {
         console.error(`[OTP] Admark error ${response.status}: ${responseText}`);
         return res.status(502).json({ message: "Failed to send OTP. Please try again." });
       }
 
-      console.log(`[OTP] Sent to ${destination} via Admark`);
     } catch (err) {
       console.error("[OTP] Admark request failed:", err);
       return res.status(502).json({ message: "Failed to send OTP. Please try again." });

@@ -101,7 +101,6 @@ export function setupAuth(app: Express) {
       if (!admin) {
         const hashedPassword = await hashPassword("admin");
         await storage.createUser({ username: "admin", password: hashedPassword });
-        console.log("Created default admin user: admin / admin");
       }
     } catch (error) {
       console.error("Failed to ensure default admin exists:", error);

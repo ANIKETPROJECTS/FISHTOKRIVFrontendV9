@@ -10,10 +10,6 @@ export const customerConnection = mongoose.createConnection(MONGODB_URI, {
   dbName: "customers",
 });
 
-customerConnection.on("connected", () => {
-  console.log("Connected to customers DB");
-});
-
 customerConnection.on("error", (err) => {
   console.error("Customer DB connection error:", err);
 });

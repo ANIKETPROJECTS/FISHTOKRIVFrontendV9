@@ -229,7 +229,6 @@ export interface HubModels {
 export async function getHubModels(dbName: string): Promise<HubModels> {
   if (!connectionCache.has(dbName)) {
     const conn = mongoose.createConnection(MONGODB_URI, { dbName });
-    conn.on("connected", () => console.log(`Connected to hub DB: ${dbName}`));
     conn.on("error", (err) => console.error(`Hub DB ${dbName} error:`, err));
     connectionCache.set(dbName, conn);
   }

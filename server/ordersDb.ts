@@ -89,7 +89,6 @@ const orderSchema = new mongoose.Schema(
 export async function connectOrdersDb() {
   if (!ordersConnection) {
     ordersConnection = mongoose.createConnection(MONGODB_URI, { dbName: "orders" });
-    ordersConnection.on("connected", () => console.log("Connected to orders DB"));
     ordersConnection.on("error", (err) => console.error("Orders DB error:", err));
     await ordersConnection.asPromise();
   }

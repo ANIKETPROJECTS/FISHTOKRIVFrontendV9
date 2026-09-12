@@ -7,7 +7,6 @@ export const adminConnection = mongoose.createConnection(MONGODB_URI, {
   dbName: "fishtokri_admin",
 });
 
-adminConnection.on("connected", () => console.log("Connected to fishtokri_admin DB"));
 adminConnection.on("error", (err) => console.error("Admin DB connection error:", err));
 
 const superHubSchema = new mongoose.Schema({
