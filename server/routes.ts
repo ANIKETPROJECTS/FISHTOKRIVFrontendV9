@@ -671,7 +671,45 @@ export async function registerRoutes(
             const successfulPayment = (payments?.items ?? []).find((payment: any) =>
               ["captured", "authorized"].includes(String(payment.status).toLowerCase()),
             );
-            if (successfulPayment) continue;
+            if (successfulPayment) {
+              const pendingOrderPayload = pending.orderPayload;
+              if (pendingOrderPayload) {
+                try {
+                  const walletPayments = (pendingOrderPayload.payments ?? [])
+                    .filter((payment: any) => payment.mode === "wallet");
+                  const recoveryPayload = {
+                    ...pendingOrderPayload,
+                    razorpayOrderId: operationId,
+                    ...buildSuccessfulRazorpayPaymentState({
+                      total: Number(pendingOrderPayload.total ?? Number(successfulPayment.amount ?? 0) / 100),
+                      paymentAmount: Number(successfulPayment.amount ?? 0) / 100,
+                      paymentId: String(successfulPayment.id),
+                      existingPayments: walletPayments,
+                      paidAt: new Date(),
+                    }),
+                  };
+                  const recoveryRes = await fetch(
+                    `http://localhost:${process.env.PORT || "5000"}/api/orders`,
+                    {
+                      method: "POST",
+                      headers: {
+                        "Content-Type": "application/json",
+                        "X-FishTokri-Paid-Recovery": "1",
+                      },
+                      body: JSON.stringify(recoveryPayload),
+                    },
+                  );
+                  if (recoveryRes.ok) {
+                    await getPendingCheckoutModel().deleteOne({ razorpayOrderId: operationId });
+                  } else {
+                    await recoveryRes.text();
+                  }
+                } catch {
+                  // Keep the paid pending checkout for the next reconciliation pass.
+                }
+              }
+              continue;
+            }
 
             const razorpayOrder = await razorpay.orders.fetch(operationId) as any;
             const razorpayOrderStatus = String(razorpayOrder?.status ?? "").toLowerCase();
