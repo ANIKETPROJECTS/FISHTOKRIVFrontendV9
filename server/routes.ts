@@ -1248,14 +1248,6 @@ export async function registerRoutes(
   app.post(api.orders.create.path, async (req, res) => {
     try {
       const input = api.orders.create.input.parse(req.body);
-      // A captured payment must never disappear just because inventory changed
-      // between checkout and webhook delivery. The webhook sets this internal
-      // header so we record a paid order for admin resolution without deducting
-      // stock a second time or rejecting the payment.
-      const recoveryHeader = req.headers["x-fishtokri-paid-recovery"] === "1";
-      const localAddress = req.socket.remoteAddress ?? "";
-      const isPaidWebhookRecovery = recoveryHeader &&
-        (localAddress === "127.0.0.1" || localAddress === "::1" || localAddress === "::ffff:127.0.0.1");
       const pendingCheckout = input.razorpayOrderId
         ? await getPendingCheckoutModel().findOne({ razorpayOrderId: input.razorpayOrderId }).lean() as any
         : null;
@@ -1263,19 +1255,10 @@ export async function registerRoutes(
         source: input.source,
         razorpayOrderId: input.razorpayOrderId,
       }) && String(input.paymentMode ?? "").toLowerCase() === "upi";
-      const ftwReservation = pendingCheckout?.inventoryReservation;
-
-      // FTW UPI stock is reserved at payment initiation. Never fall back to
-      // the generic order-create deduction path, because that can double-deduct
-      // or allow a paid order to be created without a reservation.
-      if (
-        isFtwUpiPayment &&
-        (!ftwReservation || ftwReservation.status !== "deducted")
-      ) {
-        return res.status(409).json({
-          message: "This checkout no longer has an active inventory reservation. Please start payment again.",
-        });
-      }
+      const ftwReservation =
+        pendingCheckout?.inventoryReservation?.status === "deducted"
+          ? pendingCheckout.inventoryReservation
+          : null;
 
       // Preorder dates are product eligibility metadata, not a client-trusted
       // calendar choice. Re-read the current products and validate the one
@@ -1473,8 +1456,11 @@ export async function registerRoutes(
         }
       }
 
-      // FIFO inventory deduction if hubDbName is provided (atomic per-batch to prevent overselling)
-      if (input.hubDbName && !isPaidWebhookRecovery && !ftwReservation) {
+      // FIFO inventory deduction applies only to generic orders. FTW UPI stock
+      // is reserved before Razorpay opens; if that reservation was restored
+      // during a payment handoff, leave inventoryDeducted=false for the normal
+      // recovery worker instead of deducting it a second time here.
+      if (input.hubDbName && !isFtwUpiPayment && !ftwReservation) {
         const hub = await getHubModels(input.hubDbName);
         for (const item of input.items) {
           // Always fetch the LATEST quantity from DB right before deducting
@@ -1740,6 +1726,12 @@ export async function registerRoutes(
           return res.status(400).json({ message: "Razorpay payment is not successful" });
         }
       }
+
+      // A verified payment must still become an order if the browser-close
+      // recovery path restored its reservation before Razorpay capture arrived,
+      // or if the webhook won the race and removed the pending checkout. With
+      // no active reservation, leave inventoryDeducted=false so the normal
+      // inventory worker can resolve stock once; never reject the paid order.
 
       // Today's date for deliveryDate fallback
       const now2 = new Date();
