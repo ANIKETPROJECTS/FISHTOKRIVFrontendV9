@@ -73,10 +73,6 @@ const orderSchema = new mongoose.Schema(
     timeslotStart: { type: String, default: null },
     timeslotEnd: { type: String, default: null },
     inventoryDeducted: { type: Boolean, default: false },
-    ftwInventoryStatus: { type: String, default: null },
-    ftwInventoryTrigger: { type: String, default: null },
-    ftwInventoryProcessedAt: { type: Date, default: null },
-    ftwInventoryOperationId: { type: String, default: null },
     upiTransactionId: { type: String, default: null },
     razorpayOrderId: { type: String, default: null },
     createdAt: { type: Date, default: Date.now },
@@ -89,6 +85,7 @@ const orderSchema = new mongoose.Schema(
 export async function connectOrdersDb() {
   if (!ordersConnection) {
     ordersConnection = mongoose.createConnection(MONGODB_URI, { dbName: "orders" });
+    ordersConnection.on("connected", () => console.log("Connected to orders DB"));
     ordersConnection.on("error", (err) => console.error("Orders DB error:", err));
     await ordersConnection.asPromise();
   }
@@ -112,7 +109,6 @@ const pendingCheckoutSchema = new mongoose.Schema(
   {
     razorpayOrderId: { type: String, required: true, unique: true, index: true },
     orderPayload: { type: mongoose.Schema.Types.Mixed, required: true },
-    inventoryReservation: { type: mongoose.Schema.Types.Mixed, default: null },
     createdAt: { type: Date, default: Date.now, expires: 86400 }, // 24h TTL
   },
   { versionKey: false }

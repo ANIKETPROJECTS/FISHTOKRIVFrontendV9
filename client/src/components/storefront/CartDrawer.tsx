@@ -888,79 +888,6 @@ export function CartDrawer() {
     } as any;
   };
 
-  const restoreFtwReservation = async (razorpayOrderId: string | null, reason: string) => {
-    if (!razorpayOrderId) return;
-    try {
-      const response = await fetch("/api/razorpay/restore-ftw-inventory", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ razorpayOrderId, reason }),
-      });
-      if (!response.ok && response.status !== 409) {
-        console.warn(`[checkout] Could not restore FTW inventory for ${razorpayOrderId}`);
-      }
-    } catch (error) {
-      // The signed Razorpay webhook and the pending-checkout TTL reconciliation
-      // remain server-side safety nets if the browser is offline at dismissal.
-      console.warn("[checkout] FTW inventory restore request failed:", error);
-    }
-  };
-
-  // pagehide fires when the whole tab/window is closed, so the normal
-  // Razorpay ondismiss callback is not the only abandoned-payment signal.
-  // The server checks Razorpay and restores immediately if no payment exists.
-  useEffect(() => {
-    const handlePageHide = () => {
-      const razorpayOrderId = pendingRzpOrderIdRef.current;
-      if (
-        !razorpayOrderId ||
-        paymentSucceededRef.current ||
-        returningFromUpiRef.current
-      ) {
-        return;
-      }
-
-      const body = JSON.stringify({
-        razorpayOrderId,
-        reason: "browser_closed",
-      });
-      const blob = new Blob([body], { type: "application/json" });
-
-      if (navigator.sendBeacon) {
-        navigator.sendBeacon("/api/razorpay/restore-ftw-inventory", blob);
-      } else {
-        void fetch("/api/razorpay/restore-ftw-inventory", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body,
-          keepalive: true,
-        });
-      }
-    };
-
-    window.addEventListener("pagehide", handlePageHide);
-    return () => window.removeEventListener("pagehide", handlePageHide);
-  }, []);
-
-  // Keep the pending Razorpay checkout leased on the server. This is the
-  // fallback when the browser is killed before it can deliver pagehide.
-  useEffect(() => {
-    const sendCheckoutHeartbeat = () => {
-      const razorpayOrderId = pendingRzpOrderIdRef.current;
-      if (!razorpayOrderId || paymentSucceededRef.current) return;
-
-      void fetch("/api/razorpay/checkout-heartbeat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ razorpayOrderId }),
-        keepalive: true,
-      }).catch(() => {});
-    };
-
-    const heartbeatTimer = window.setInterval(sendCheckoutHeartbeat, 10_000);
-    return () => window.clearInterval(heartbeatTimer);
-  }, []);
-
   const placeOrder = async () => {
     const selected = savedAddresses.find(a => a.id === activeAddressId);
     if (!selected) return;
@@ -1108,7 +1035,6 @@ export function CartDrawer() {
             });
             const verifyData = await verifyRes.json();
             if (!verifyData.verified) {
-              await restoreFtwReservation(response.razorpay_order_id, "payment_failed");
               paymentSucceededRef.current = false;
               toast({ title: "Payment verification failed. Contact support.", variant: "destructive" });
               setIsProcessingPayment(false);
@@ -1125,7 +1051,6 @@ export function CartDrawer() {
                 paymentSucceededRef.current = false;
               },
               onError: (err: any) => {
-                void restoreFtwReservation(order_id, "order_create_failed");
                 paymentSucceededRef.current = false;
                 setIsProcessingPayment(false);
                 setIsCartOpen(true);
@@ -1133,7 +1058,6 @@ export function CartDrawer() {
               },
             });
           } catch {
-            void restoreFtwReservation(response.razorpay_order_id, "payment_failed");
             paymentSucceededRef.current = false;
             toast({ title: "Payment failed. Please contact support.", variant: "destructive" });
             setIsProcessingPayment(false);
@@ -1144,8 +1068,6 @@ export function CartDrawer() {
             // Suppress if payment already succeeded OR if we're actively polling after returning from a UPI app
             if (paymentSucceededRef.current || returningFromUpiRef.current) return;
             // User closed the modal — treat as cancellation and reset state
-            const cancelledOrderId = pendingRzpOrderIdRef.current;
-            void restoreFtwReservation(cancelledOrderId, "payment_cancelled");
             pendingRzpOrderIdRef.current = null;
             pendingSelectedAddressRef.current = null;
             setIsProcessingPayment(false);
@@ -1165,9 +1087,6 @@ export function CartDrawer() {
       const rzp = new (window as any).Razorpay(options);
       rzp.open();
     } catch {
-      void restoreFtwReservation(pendingRzpOrderIdRef.current, "payment_start_failed");
-      pendingRzpOrderIdRef.current = null;
-      pendingSelectedAddressRef.current = null;
       toast({ title: "Payment failed. Please try again.", variant: "destructive" });
       setIsProcessingPayment(false);
       setIsCartOpen(true);

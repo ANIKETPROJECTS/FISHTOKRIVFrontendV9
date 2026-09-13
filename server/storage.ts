@@ -269,6 +269,11 @@ export class MongoStorage implements IStorage {
         (!pincode || String(a.pincode).trim() === String(pincode).trim())
       );
     if (matches.length === 0) return undefined;
+    if (matches.length > 1) {
+      console.warn(
+        `[updateCustomerAddress] Ambiguous composite match for phone=${phone}: ${matches.length} addresses share building/area/pincode. Updating the first match; consider backfilling _id for this customer.`
+      );
+    }
     const addrIndex = matches[0].i;
     const setByIndex: Record<string, any> = { updatedAt: new Date() };
     if (!matches[0].a._id) {
@@ -313,6 +318,11 @@ export class MongoStorage implements IStorage {
         (!pincode || String(a.pincode).trim() === String(pincode).trim())
       );
     if (matches.length === 0) return undefined;
+    if (matches.length > 1) {
+      console.warn(
+        `[deleteCustomerAddress] Ambiguous composite match for phone=${phone}: ${matches.length} addresses share building/area/pincode. Deleting only the first match.`
+      );
+    }
     const addrIndex = matches[0].i;
     const doc = await CustomerDbModel.findOneAndUpdate(
       { phone },

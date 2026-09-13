@@ -3,8 +3,8 @@ name: Cross-channel inventory mismatch
 description: FTS and FTW must share one atomic stock field; external batches and storefront inventoryBatches are not interchangeable.
 ---
 
-Production evidence for the Baby Surmai incident shows FTS and FTW both used the shared Thane product document and POS-managed `batches`: FTS reduced stock from 2 to 1, then FTW correctly rejected a request for 2. The actual failure was that FTW persisted/left the order as `delivered` after the inventory deduction failed, with no inventory movement and `inventoryDeducted: false`. The current workspace also contains a separate `batches` versus `inventoryBatches` code-path risk, so the running deployment must be matched to source before changing it.
+FTW currently reads availability from both the POS-managed `batches` array and its own `inventoryBatches` array, but its checkout deduction updates only `inventoryBatches` or the top-level `quantity`. FTS deductions in `batches` are therefore invisible to FTW's atomic guard, and FTW deductions do not appear in the POS inventory history.
 
-**Why:** An order lifecycle can report success even when stock reservation fails; the customer/order state then disagrees with inventory even though the stock guard worked.
+**Why:** Separate applications can accept the same last unit when they decrement different fields, especially when orders are punched concurrently.
 
-**How to apply:** Make stock reservation a prerequisite for an active order. If deduction fails, do not create/activate the order; if asynchronous processing is retained, keep the order pending and transition it only after successful deduction, with explicit cancellation/refund handling on failure.
+**How to apply:** Before changing checkout or stock display, identify the canonical shared counter and make both channels use an atomic conditional decrement against it; do not sum independent batch arrays unless they represent distinct stock.

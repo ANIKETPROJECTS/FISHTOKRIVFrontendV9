@@ -94,8 +94,11 @@ export async function syncAllHubInventory() {
       }
     }
 
+    console.log(
+      `[inventory sync] updated ${totalBatchesUpdated} batch(es) across ${subHubs.length} hub(s); deactivated ${totalCombosDeactivated} combo(s) due to expired products`
+    );
   } catch (err) {
-    // Retry on the next scheduled sync.
+    console.error("[inventory sync] error:", err);
   }
 }
 
