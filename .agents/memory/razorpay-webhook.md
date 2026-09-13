@@ -36,6 +36,7 @@ The storefront must treat a verified successful Razorpay result as the only auth
 - Both `createOrder` call sites (modal handler + UPI-resume visibilitychange) now spread `razorpayOrderId: order_id` (or `razorpayOrderId: orderId`) into the payload for deduplication.
 - A `pagehide` beacon requests immediate restoration when the whole tab closes. The server re-checks Razorpay first and preserves successful payments; the heartbeat and five-minute reconciliation remain fallbacks when the browser signal is not delivered.
 - While the payment screen is open, a server heartbeat updates `lastClientSeenAt` every 10 seconds. Reconciliation uses the missing lease as a fallback when the browser dies before `pagehide`.
+- Order creation must perform payment-reference idempotency before requiring an active FTW reservation. A verified paid retry with a restored/missing reservation must still create the order with inventory recovery left for the worker.
 
 ## Setup required
 1. Razorpay Dashboard → Settings → Webhooks → add URL: `https://<domain>/api/webhooks/razorpay`
