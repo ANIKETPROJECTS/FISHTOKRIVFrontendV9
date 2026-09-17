@@ -2178,8 +2178,8 @@ export async function registerRoutes(
     const admarkApiKey = process.env.ADMARK_API_KEY;
     const admarkPhoneNumberId = process.env.ADMARK_PHONE_NUMBER_ID;
     if (!admarkApiKey || !admarkPhoneNumberId) {
-      console.error("[OTP] ADMARK_API_KEY or ADMARK_PHONE_NUMBER_ID not set — OTP not sent via WhatsApp");
-      return res.json({ message: "OTP sent" });
+      console.error("[OTP] ADMARK_API_KEY or ADMARK_PHONE_NUMBER_ID not set — cannot send OTP");
+      return res.status(503).json({ message: "OTP service is not configured. Please try again later." });
     }
 
     try {

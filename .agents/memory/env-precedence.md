@@ -7,4 +7,4 @@ Keep values in `ecosystem.config.cjs` for compatibility, but merge runtime envir
 
 **Why:** The user needs the imported ecosystem configuration preserved while switching the active development connection to the newly configured secret.
 
-**How to apply:** Do not delete ecosystem entries to change runtime behavior; adjust the launcher merge precedence instead.
+**How to apply:** Do not delete ecosystem entries to change runtime behavior; adjust the launcher's merge precedence instead. Both development and production launchers must load ecosystem defaults before applying runtime environment variables.
