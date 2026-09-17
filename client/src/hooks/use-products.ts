@@ -9,8 +9,8 @@ export function useProducts() {
     // Expiry is evaluated against the current time when the API maps products.
     // Keep this explicit here so a batch disappearing at its expiry time does
     // not depend on another component's query defaults.
-    refetchInterval: 1_000,
-    refetchIntervalInBackground: true,
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
     queryFn: async () => {
       const res = await fetch(api.products.list.path, {
         headers: getHubHeaders(),

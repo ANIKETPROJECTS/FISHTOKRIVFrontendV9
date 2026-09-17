@@ -74,7 +74,9 @@ export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       queryFn: getQueryFn({ on401: "throw" }),
-      refetchInterval: 1_000,
+      // Individual live-data queries opt into their own refresh interval.
+      // Do not poll every API query globally (especially /api/customer/me).
+      refetchInterval: false,
       refetchOnWindowFocus: true,
       staleTime: 0,
       retry: false,
