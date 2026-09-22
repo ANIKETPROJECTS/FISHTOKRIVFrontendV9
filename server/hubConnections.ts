@@ -44,6 +44,10 @@ const productSchema = new mongoose.Schema({
     endDate: { type: String, default: "" },
   },
   couponIds: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+  // Some admin-managed hubs use `batches` instead of this app's
+  // `inventoryBatches`; keep both fields writable so FTW reservations can
+  // restore the exact batch they deducted from.
+  batches: { type: [mongoose.Schema.Types.Mixed], default: undefined },
   inventoryBatches: { type: [inventoryBatchSchema], default: [] },
   recipes: [{
     title: { type: String },
@@ -132,6 +136,25 @@ const comboSchema = new mongoose.Schema({
   sortOrder: { type: Number, default: 0 },
 });
 
+const inventoryMovementSchema = new mongoose.Schema(
+  {
+    type: { type: String, required: true },
+    operationKey: { type: String, required: true, unique: true, index: true },
+    productId: { type: String, required: true },
+    productName: { type: String, default: "" },
+    unit: { type: String, default: null },
+    change: { type: Number, required: true },
+    balance: { type: Number, required: true },
+    orderId: { type: String, required: true },
+    orderRef: { type: String, default: "" },
+    batchNumbers: { type: String, default: "" },
+    subReason: { type: String, required: true },
+    expiryDate: { type: Date, default: null },
+    createdAt: { type: Date, default: Date.now },
+  },
+  { collection: "inventory_movements", versionKey: false },
+);
+
 const timeslotSchema = new mongoose.Schema({
   label: { type: String, required: true },
   startTime: { type: String, default: null },
@@ -184,6 +207,7 @@ export interface HubModels {
   Coupon: mongoose.Model<any>;
   CouponUsage: mongoose.Model<any>;
   CouponLocationUsage: mongoose.Model<any>;
+  InventoryMovement: mongoose.Model<any>;
 }
 
 export async function getHubModels(dbName: string): Promise<HubModels> {
@@ -210,5 +234,6 @@ export async function getHubModels(dbName: string): Promise<HubModels> {
     Coupon: getModel("Coupon", couponSchema),
     CouponUsage: getModel("CouponUsage", couponUsageSchema),
     CouponLocationUsage: getModel("CouponLocationUsage", couponLocationUsageSchema),
+    InventoryMovement: getModel("InventoryMovement", inventoryMovementSchema),
   };
 }

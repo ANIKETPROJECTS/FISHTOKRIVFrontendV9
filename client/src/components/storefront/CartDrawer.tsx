@@ -204,6 +204,11 @@ export function CartDrawer() {
   const pendingRzpOrderIdRef = useRef<string | null>(null);
   const pendingSelectedAddressRef = useRef<any>(null);
   const returningFromUpiRef = useRef(false);
+  const checkoutAttemptIdRef = useRef<string | null>(null);
+  const [activeInventoryReservation, setActiveInventoryReservation] = useState<{
+    razorpayOrderId: string;
+    reservationId: string;
+  } | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<"cod" | "online">("online");
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const [showUnserviceablePopup, setShowUnserviceablePopup] = useState(false);
@@ -811,6 +816,8 @@ export function CartDrawer() {
       price: i.price,
       unit: (i as any).unit ?? null,
       imageUrl: i.imageUrl ?? null,
+      isCombo: Boolean((i as any).isCombo),
+      comboIncludes: (i as any).comboIncludes ?? undefined,
     }));
     const slotLabel = selectedTimeslot!.isInstant ? "Instant Delivery (Porter)" : getAdjustedSlotLabel(selectedTimeslot!);
     const instantCharge = selectedTimeslot!.isInstant ? (selectedTimeslot!.extraCharge ?? 0) : 0;
@@ -980,11 +987,19 @@ export function CartDrawer() {
       // it as a pending checkout. The webhook uses this to reconstruct the order if
       // the browser closes before the client-side handler fires.
       const pendingOrderPayload = buildOrderPayload(selected);
+      const checkoutAttemptId =
+        checkoutAttemptIdRef.current ??
+        (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`);
+      checkoutAttemptIdRef.current = checkoutAttemptId;
 
       const res = await fetch("/api/razorpay/create-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ amount: finalTotal, orderPayload: pendingOrderPayload }),
+        body: JSON.stringify({
+          amount: finalTotal,
+          orderPayload: pendingOrderPayload,
+          checkoutAttemptId,
+        }),
       });
       if (!res.ok) {
         const errorData = await res.json().catch(() => null);
@@ -996,7 +1011,18 @@ export function CartDrawer() {
         setIsCartOpen(true);
         return;
       }
-      const { order_id, amount: rzpAmount, currency } = await res.json();
+      const {
+        order_id,
+        amount: rzpAmount,
+        currency,
+        inventoryReservationId,
+      } = await res.json();
+      if (inventoryReservationId) {
+        setActiveInventoryReservation({
+          razorpayOrderId: order_id,
+          reservationId: inventoryReservationId,
+        });
+      }
 
       const options = {
         key: import.meta.env.VITE_RAZORPAY_KEY_ID,
@@ -1048,6 +1074,8 @@ export function CartDrawer() {
                 clearCart();
                 setUseWallet(false);
                 setIsProcessingPayment(false);
+                 setActiveInventoryReservation(null);
+                 checkoutAttemptIdRef.current = null;
                 paymentSucceededRef.current = false;
               },
               onError: (err: any) => {
@@ -1068,8 +1096,21 @@ export function CartDrawer() {
             // Suppress if payment already succeeded OR if we're actively polling after returning from a UPI app
             if (paymentSucceededRef.current || returningFromUpiRef.current) return;
             // User closed the modal — treat as cancellation and reset state
+            const cancelledOrderId = pendingRzpOrderIdRef.current;
+            if (cancelledOrderId && inventoryReservationId) {
+              fetch("/api/razorpay/inventory-cancel", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  razorpayOrderId: cancelledOrderId,
+                  reservationId: inventoryReservationId,
+                }),
+              }).catch(() => {});
+            }
             pendingRzpOrderIdRef.current = null;
             pendingSelectedAddressRef.current = null;
+            setActiveInventoryReservation(null);
+            checkoutAttemptIdRef.current = null;
             setIsProcessingPayment(false);
             setIsCartOpen(true);
             toast({ title: "Payment cancelled", variant: "destructive" });
@@ -1092,6 +1133,36 @@ export function CartDrawer() {
       setIsCartOpen(true);
     }
   };
+
+  // A live lease is refreshed while Razorpay is open. There is deliberately no
+  // unload request: a forced-close/browser crash cannot reliably send one, so
+  // the backend restores the reservation after this lease expires.
+  useEffect(() => {
+    if (!activeInventoryReservation) return;
+    let stopped = false;
+    const heartbeat = async () => {
+      try {
+        const response = await fetch("/api/razorpay/inventory-heartbeat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            razorpayOrderId: activeInventoryReservation.razorpayOrderId,
+            reservationId: activeInventoryReservation.reservationId,
+          }),
+        });
+        if (!response.ok && !stopped) setActiveInventoryReservation(null);
+      } catch {
+        // A transient network error is safe; the next heartbeat retries.
+      }
+    };
+    void heartbeat();
+    const interval = window.setInterval(heartbeat, 30_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+    };
+  }, [activeInventoryReservation]);
 
   // Preload Razorpay script as soon as cart opens so it's ready instantly when user clicks Pay
   useEffect(() => {
@@ -1162,6 +1233,8 @@ export function CartDrawer() {
             setUseWallet(false);
             setIsProcessingPayment(false);
             paymentSucceededRef.current = false;
+            setActiveInventoryReservation(null);
+            checkoutAttemptIdRef.current = null;
             returningFromUpiRef.current = false;
           },
           onError: (err: any) => {

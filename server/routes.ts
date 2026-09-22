@@ -21,6 +21,15 @@ import {
   isFtwStorefrontOrder,
   isSuccessfulRazorpayStatus,
 } from "./razorpayPayment";
+import {
+  commitFtwReservation,
+  getPendingFtwReservation,
+  heartbeatFtwReservation,
+  reserveFtwInventory,
+  restoreFtwOrderInventory,
+  restorePendingFtwReservation,
+  startFtwReservationReconciler,
+} from "./ftwInventory";
 
 declare module "express-session" {
   interface SessionData {
@@ -618,6 +627,22 @@ export async function registerRoutes(
     console.warn("[Razorpay] RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set — payment routes disabled");
   }
 
+  const getRazorpayPaymentState = async (razorpayOrderId: string): Promise<"captured" | "pending" | "failed"> => {
+    if (!razorpay) return "pending";
+    try {
+      const payments = await razorpay.orders.fetchPayments(razorpayOrderId) as any;
+      const entries = payments.items ?? [];
+      if (entries.some((payment: any) => isSuccessfulRazorpayStatus(payment.status))) return "captured";
+      if (entries.some((payment: any) => payment.status === "failed" || payment.status === "refunded")) return "failed";
+      return "pending";
+    } catch {
+      // A provider lookup failure must never cause an unpaid reservation to be
+      // restored prematurely. The next reconciliation pass will retry.
+      return "pending";
+    }
+  };
+  startFtwReservationReconciler(getRazorpayPaymentState);
+
   const fetchVerifiedRazorpayPayment = async (
     razorpayOrderId: string,
     razorpayPaymentId: string,
@@ -642,9 +667,25 @@ export async function registerRoutes(
   app.post("/api/razorpay/create-order", async (req, res) => {
     if (!razorpay) return res.status(503).json({ message: "Payment service not configured" });
     try {
-      const { amount, orderPayload } = req.body;
+      const { amount, orderPayload, checkoutAttemptId } = req.body;
       if (!amount || typeof amount !== "number" || amount <= 0) {
         return res.status(400).json({ message: "Invalid amount" });
+      }
+      if (checkoutAttemptId) {
+        const existingPending = await getPendingCheckoutModel().findOne({
+          checkoutAttemptId: String(checkoutAttemptId),
+          ftwInventoryState: { $in: ["none", "reserving", "reserved", "committed"] },
+        }).lean() as any;
+        if (existingPending) {
+          const existingRazorpayOrder = await (razorpay.orders as any).fetch(existingPending.razorpayOrderId);
+          return res.json({
+            order_id: existingRazorpayOrder.id,
+            amount: existingRazorpayOrder.amount,
+            currency: existingRazorpayOrder.currency,
+            inventoryReservationId: existingPending.ftwInventoryReservationId,
+            inventoryReservationExpiresAt: existingPending.ftwInventoryReservationExpiresAt,
+          });
+        }
       }
       if (orderPayload && typeof orderPayload === "object") {
         try {
@@ -673,7 +714,12 @@ export async function registerRoutes(
           const PendingCheckout = getPendingCheckoutModel();
           await PendingCheckout.findOneAndUpdate(
             { razorpayOrderId: order.id },
-            { razorpayOrderId: order.id, orderPayload },
+            {
+              razorpayOrderId: order.id,
+              checkoutAttemptId: checkoutAttemptId ? String(checkoutAttemptId) : null,
+              orderPayload,
+              ftwInventoryState: "none",
+            },
             { upsert: true, new: true }
           );
         } catch (storeErr) {
@@ -682,10 +728,73 @@ export async function registerRoutes(
         }
       }
 
-      return res.json({ order_id: order.id, amount: order.amount, currency: order.currency });
+      let inventoryReservation: any = null;
+      const isFtwUpiCheckout =
+        orderPayload &&
+        orderPayload.source === "online" &&
+        orderPayload.paymentMode === "upi" &&
+        orderPayload.hubDbName &&
+        Array.isArray(orderPayload.items);
+      if (isFtwUpiCheckout) {
+        try {
+          inventoryReservation = await reserveFtwInventory({
+            razorpayOrderId: order.id,
+            hubDbName: String(orderPayload.hubDbName),
+            items: orderPayload.items,
+            checkoutAttemptId: checkoutAttemptId ? String(checkoutAttemptId) : null,
+          });
+        } catch (reservationError: any) {
+          console.error(`[FTW inventory] Reservation failed for ${order.id}:`, reservationError);
+          await getPendingCheckoutModel().deleteOne({ razorpayOrderId: order.id });
+          return res.status(409).json({
+            message: reservationError?.message || "Some items are no longer available. Please refresh your cart.",
+          });
+        }
+      }
+
+      return res.json({
+        order_id: order.id,
+        amount: order.amount,
+        currency: order.currency,
+        inventoryReservationId: inventoryReservation?.reservationId ?? null,
+        inventoryReservationExpiresAt: inventoryReservation?.expiresAt ?? null,
+      });
     } catch (err: any) {
       console.error("[Razorpay] create-order error:", err);
       return res.status(500).json({ message: "Failed to create payment order" });
+    }
+  });
+
+  // Heartbeats are deliberately only a lease refresh. If the browser is
+  // force-closed, no final request is required; the server reconciler restores
+  // the expired reservation after checking Razorpay first.
+  app.post("/api/razorpay/inventory-heartbeat", async (req, res) => {
+    const { razorpayOrderId, reservationId } = req.body ?? {};
+    if (!razorpayOrderId || !reservationId) {
+      return res.status(400).json({ message: "Missing reservation details" });
+    }
+    const refreshed = await heartbeatFtwReservation(String(razorpayOrderId), String(reservationId));
+    if (!refreshed) return res.status(409).json({ message: "Inventory reservation is no longer active" });
+    return res.json({ ok: true });
+  });
+
+  // Used for an explicit Razorpay modal cancellation while the page is still
+  // alive. Forced tab/device closure is handled by the heartbeat lease expiry.
+  app.post("/api/razorpay/inventory-cancel", async (req, res) => {
+    const { razorpayOrderId, reservationId } = req.body ?? {};
+    if (!razorpayOrderId || !reservationId) {
+      return res.status(400).json({ message: "Missing reservation details" });
+    }
+    const pending = await getPendingFtwReservation(String(razorpayOrderId));
+    if (!pending || pending.ftwInventoryReservationId !== String(reservationId)) {
+      return res.status(404).json({ message: "Inventory reservation not found" });
+    }
+    try {
+      await restorePendingFtwReservation(pending, "payment_cancelled");
+      return res.json({ ok: true });
+    } catch (error) {
+      console.error(`[FTW inventory] Explicit cancellation restore failed for ${razorpayOrderId}:`, error);
+      return res.status(500).json({ message: "Inventory restoration requires reconciliation" });
     }
   });
 
@@ -719,8 +828,24 @@ export async function registerRoutes(
     }
 
     const event = req.body;
-    // Only handle payment.captured; acknowledge all other events immediately
+    // Failed payments can be restored immediately. If Razorpay does not send a
+    // failure event, the heartbeat lease reconciler handles the same case.
     if (event.event !== "payment.captured") {
+      if (event.event === "payment.failed" || event.event === "payment.cancelled" || event.event === "order.expired") {
+        const failedOrderId =
+          event.payload?.payment?.entity?.order_id ??
+          event.payload?.order?.entity?.id;
+        if (failedOrderId) {
+          const pending = await getPendingFtwReservation(String(failedOrderId));
+          if (pending) {
+            try {
+              await restorePendingFtwReservation(pending, "payment_failed");
+            } catch (restoreError) {
+              console.error(`[Razorpay webhook] Failed-payment inventory restore failed for ${failedOrderId}:`, restoreError);
+            }
+          }
+        }
+      }
       return res.status(200).json({ message: "Event ignored" });
     }
 
@@ -884,6 +1009,24 @@ export async function registerRoutes(
       const localAddress = req.socket.remoteAddress ?? "";
       const isPaidWebhookRecovery = recoveryHeader &&
         (localAddress === "127.0.0.1" || localAddress === "::1" || localAddress === "::ffff:127.0.0.1");
+      const pendingFtwReservation = input.razorpayOrderId
+        ? await getPendingFtwReservation(String(input.razorpayOrderId))
+        : null;
+      const isFtwUpiCheckout =
+        input.source === "online" &&
+        input.paymentMode === "upi" &&
+        Boolean(input.razorpayOrderId) &&
+        Boolean(input.hubDbName);
+      const hasFtwReservation =
+        isFtwUpiCheckout &&
+        (pendingFtwReservation?.ftwInventoryState === "reserved" ||
+          pendingFtwReservation?.ftwInventoryState === "committed");
+
+      if (isFtwUpiCheckout && !isPaidWebhookRecovery && !hasFtwReservation) {
+        return res.status(409).json({
+          message: "This checkout inventory reservation has expired. Please restart payment.",
+        });
+      }
 
       // Preorder dates are product eligibility metadata, not a client-trusted
       // calendar choice. Re-read the current products and validate the one
@@ -1083,8 +1226,11 @@ export async function registerRoutes(
         }
       }
 
-      // FIFO inventory deduction if hubDbName is provided (atomic per-batch to prevent overselling)
-      if (input.hubDbName && !isPaidWebhookRecovery) {
+      // Legacy/COD inventory deduction remains here. UPI FTW orders are
+      // reserved before Razorpay opens and must never be deducted a second
+      // time during order creation.
+      let legacyInventoryDeducted = false;
+      if (input.hubDbName && !isPaidWebhookRecovery && !isFtwUpiCheckout) {
         const hub = await getHubModels(input.hubDbName);
         for (const item of input.items) {
           // Always fetch the LATEST quantity from DB right before deducting
@@ -1195,6 +1341,7 @@ export async function registerRoutes(
           );
           await hub.Product.findByIdAndUpdate(item.productId, { $set: { quantity: totalQty } });
         }
+        legacyInventoryDeducted = true;
       }
 
       // Resolve coupon details and hub identity before persisting
@@ -1442,6 +1589,7 @@ export async function registerRoutes(
         notes: input.notes ?? "",
         status: "pending",
         source: "online",
+        hubDbName: input.hubDbName ?? null,
         subHubId: resolvedSubHubId ?? null,
         subHubName: resolvedSubHubName ?? null,
         superHubId: resolvedSuperHubId ?? null,
@@ -1469,8 +1617,29 @@ export async function registerRoutes(
       // orderId and inventoryDeducted are set together in one update AFTER save,
       // so both appear after createdAt/updatedAt — matching admin POS field order exactly.
       await getOrderModel().findByIdAndUpdate(order.id, {
-        $set: { orderId: generatedOrderId, inventoryDeducted: false },
+        $set: {
+          orderId: generatedOrderId,
+          inventoryDeducted: Boolean(legacyInventoryDeducted || hasFtwReservation),
+          ...(hasFtwReservation
+            ? {
+                ftwInventoryManagedBy: "frontend",
+                ftwInventoryState: "reserved",
+                ftwInventoryOperationId: pendingFtwReservation?.ftwInventoryOperationId ?? null,
+                ftwInventoryReservationId: pendingFtwReservation?.ftwInventoryReservationId ?? null,
+                ftwInventoryReservationExpiresAt: pendingFtwReservation?.ftwInventoryReservationExpiresAt ?? null,
+                ftwInventoryHeartbeatAt: new Date(),
+                ftwInventoryAllocationLedger: pendingFtwReservation?.ftwInventoryAllocationLedger ?? [],
+              }
+            : {}),
+        },
       });
+      if (hasFtwReservation && input.razorpayOrderId) {
+        await commitFtwReservation({
+          razorpayOrderId: String(input.razorpayOrderId),
+          orderId: String(order.id),
+          orderRef: `#${String(order.id).slice(-6).toUpperCase()}`,
+        });
+      }
 
       const orderItemsTotal = (order.items as any[]).reduce((sum: number, item: any) => {
         return sum + ((item.price ?? 0) * (item.quantity ?? 1));
@@ -1590,6 +1759,7 @@ export async function registerRoutes(
 
       // Fetch old order before updating so we know the previous status
       const oldOrder = await storage.getOrderRequest(req.params.id);
+      const oldOrderDocument = await getOrderModel().findById(req.params.id).lean() as any;
       const oldStatus = oldOrder?.status ?? "pending";
 
       const order = await storage.updateOrderRequestStatus(req.params.id, input.status);
@@ -1597,6 +1767,18 @@ export async function registerRoutes(
         return res.status(404).json({ message: "Order not found" });
       }
       await storage.updateCustomerOrderStatus(order.phone, order.id, input.status);
+
+      if (
+        oldOrderDocument?.ftwInventoryState === "reserved" &&
+        oldStatus !== "cancelled" &&
+        input.status === "cancelled"
+      ) {
+        try {
+          await restoreFtwOrderInventory(String(req.params.id), "order_cancelled");
+        } catch (inventoryError) {
+          console.error(`[FTW inventory] Cancellation restore failed for ${req.params.id}:`, inventoryError);
+        }
+      }
 
       // ── Coupon lifecycle ────────────────────────────────────────────────
       const couponCode = order.coupon?.code;
