@@ -895,7 +895,7 @@ export function CartDrawer() {
     } as any;
   };
 
-  const placeOrder = async () => {
+  const placeOrder = async (testUpi = false) => {
     const selected = savedAddresses.find(a => a.id === activeAddressId);
     if (!selected) return;
     if (isPreorderCart) {
@@ -963,6 +963,36 @@ export function CartDrawer() {
           toast({ title: err?.message || "Could not place order. Please try again.", variant: "destructive" });
         },
       });
+      return;
+    }
+
+    // Development-only UPI simulator. It uses the server-side reservation and
+    // normal order creation path but never opens Razorpay or charges money.
+    if (testUpi && import.meta.env.DEV) {
+      setIsProcessingPayment(true);
+      try {
+        const response = await fetch("/api/dev/test-upi-order", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orderPayload: buildOrderPayload(selected) }),
+        });
+        const result = await response.json().catch(() => null);
+        if (!response.ok) {
+          throw new Error(result?.message || "Could not create test UPI order");
+        }
+        setIsCartOpen(true);
+        setIsSuccess(true);
+        clearCart();
+        setUseWallet(false);
+        toast({ title: "Test UPI order placed", description: "No payment was charged." });
+      } catch (error: any) {
+        toast({
+          title: error?.message || "Could not create test UPI order",
+          variant: "destructive",
+        });
+      } finally {
+        setIsProcessingPayment(false);
+      }
       return;
     }
 
@@ -2167,6 +2197,18 @@ export function CartDrawer() {
                         }
                       </Button>
                     </div>
+                    {import.meta.env.DEV && paymentMethod === "online" && finalTotal > 0 && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => void placeOrder(true)}
+                        disabled={isPending || isProcessingPayment || !customer || savedAddresses.length === 0 || !isHubReady}
+                        className="w-full mt-2 h-9 rounded-full border-dashed border-orange-300 text-orange-600 hover:bg-orange-50"
+                        data-testid="button-test-upi-order"
+                      >
+                        Test UPI order (dev only)
+                      </Button>
+                    )}
                     {!customer && (
                       <p className="text-xs text-center text-muted-foreground mt-2">Please log in to place an order</p>
                     )}
