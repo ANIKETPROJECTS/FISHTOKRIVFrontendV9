@@ -15,7 +15,7 @@ import { getHubModels } from "./hubConnections";
 import { CustomerDbModel } from "./customerDb";
 import { computeExpiryDate, computeRemainingTime } from "./inventorySync";
 import Razorpay from "razorpay";
-import { createHmac } from "crypto";
+import { createHmac, randomUUID } from "crypto";
 import {
   buildSuccessfulRazorpayPaymentState,
   isFtwStorefrontOrder,
@@ -765,6 +765,96 @@ export async function registerRoutes(
     }
   });
 
+  // Development-only payment simulator. This intentionally uses the normal
+  // order route after reserving inventory, but never contacts Razorpay and is
+  // rejected outright when the server runs in production.
+  app.post("/api/dev/test-upi-order", async (req, res) => {
+    if (process.env.NODE_ENV === "production") {
+      return res.status(404).json({ message: "Not found" });
+    }
+
+    const orderPayload = req.body?.orderPayload;
+    if (!orderPayload || typeof orderPayload !== "object") {
+      return res.status(400).json({ message: "Missing order payload" });
+    }
+    if (
+      orderPayload.source !== "online" ||
+      orderPayload.paymentMode !== "upi" ||
+      !orderPayload.hubDbName ||
+      !Array.isArray(orderPayload.items)
+    ) {
+      return res.status(400).json({ message: "Invalid test UPI order payload" });
+    }
+
+    const razorpayOrderId = `test_upi_order_${randomUUID()}`;
+    const paymentId = `test_upi_payment_${randomUUID()}`;
+    const PendingCheckout = getPendingCheckoutModel();
+    const storedPayload = {
+      ...orderPayload,
+      paymentMode: "upi",
+    };
+
+    try {
+      await PendingCheckout.create({
+        razorpayOrderId,
+        checkoutAttemptId: `test_${randomUUID()}`,
+        orderPayload: storedPayload,
+        ftwInventoryState: "none",
+      });
+
+      await reserveFtwInventory({
+        razorpayOrderId,
+        hubDbName: String(orderPayload.hubDbName),
+        items: orderPayload.items,
+      });
+
+      const simulatedPayload = {
+        ...storedPayload,
+        razorpayOrderId,
+        payments: [{
+          mode: "upi",
+          amount: Number(orderPayload.total ?? 0),
+          reference: paymentId,
+          paidAt: new Date().toISOString(),
+        }],
+        paymentStatus: "paid",
+        paidAmount: Number(orderPayload.total ?? 0),
+        dueAmount: 0,
+      };
+      const port = process.env.PORT || "5000";
+      const createRes = await fetch(`http://localhost:${port}/api/orders`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-FishTokri-Test-UPI": "1",
+        },
+        body: JSON.stringify(simulatedPayload),
+      });
+
+      if (!createRes.ok) {
+        const errorText = await createRes.text();
+        const pending = await getPendingFtwReservation(razorpayOrderId);
+        if (pending) {
+          await restorePendingFtwReservation(pending, "payment_failed");
+        }
+        return res.status(409).json({ message: errorText || "Could not create test UPI order" });
+      }
+
+      return res.status(201).json(await createRes.json());
+    } catch (error: any) {
+      try {
+        const pending = await getPendingFtwReservation(razorpayOrderId);
+        if (pending) {
+          await restorePendingFtwReservation(pending, "payment_failed");
+        }
+      } catch (restoreError) {
+        console.error(`[Test UPI] Failed to restore simulated reservation ${razorpayOrderId}:`, restoreError);
+      }
+      console.error("[Test UPI] Simulated order failed:", error);
+      return res.status(500).json({ message: error?.message || "Could not create test UPI order" });
+    }
+  });
+
   // Heartbeats are deliberately only a lease refresh. If the browser is
   // force-closed, no final request is required; the server reconciler restores
   // the expired reservation after checking Razorpay first.
@@ -1006,6 +1096,9 @@ export async function registerRoutes(
       // header so we record a paid order for admin resolution without deducting
       // stock a second time or rejecting the payment.
       const recoveryHeader = req.headers["x-fishtokri-paid-recovery"] === "1";
+      const isDevTestUpi =
+        process.env.NODE_ENV !== "production" &&
+        req.headers["x-fishtokri-test-upi"] === "1";
       const localAddress = req.socket.remoteAddress ?? "";
       const isPaidWebhookRecovery = recoveryHeader &&
         (localAddress === "127.0.0.1" || localAddress === "::1" || localAddress === "::ffff:127.0.0.1");
@@ -1495,17 +1588,25 @@ export async function registerRoutes(
         if (!input.razorpayOrderId || !upiTransactionId) {
           return res.status(400).json({ message: "Incomplete Razorpay payment details" });
         }
-        try {
-          verifiedRazorpayPayment = await fetchVerifiedRazorpayPayment(
-            input.razorpayOrderId,
-            upiTransactionId,
-          );
-        } catch (paymentErr) {
-          console.error("[Razorpay] Payment verification lookup failed:", paymentErr);
-          return res.status(502).json({ message: "Could not verify Razorpay payment" });
-        }
-        if (!verifiedRazorpayPayment) {
-          return res.status(400).json({ message: "Razorpay payment is not successful" });
+        if (isDevTestUpi && upiTransactionId.startsWith("test_upi_payment_")) {
+          verifiedRazorpayPayment = {
+            id: upiTransactionId,
+            orderId: input.razorpayOrderId,
+            amount: total,
+          };
+        } else {
+          try {
+            verifiedRazorpayPayment = await fetchVerifiedRazorpayPayment(
+              input.razorpayOrderId,
+              upiTransactionId,
+            );
+          } catch (paymentErr) {
+            console.error("[Razorpay] Payment verification lookup failed:", paymentErr);
+            return res.status(502).json({ message: "Could not verify Razorpay payment" });
+          }
+          if (!verifiedRazorpayPayment) {
+            return res.status(400).json({ message: "Razorpay payment is not successful" });
+          }
         }
       }
 
