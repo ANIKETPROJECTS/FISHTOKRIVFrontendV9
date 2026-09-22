@@ -8,6 +8,7 @@ import { Footer } from "@/components/storefront/Footer";
 import { CartDrawer } from "@/components/storefront/CartDrawer";
 import { ProductCard } from "@/components/storefront/ProductCard";
 import { SwipeHint } from "@/components/storefront/SwipeHint";
+import { DragScrollDiv } from "@/components/storefront/DragScrollDiv";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ChevronLeft } from "lucide-react";
