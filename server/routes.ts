@@ -23,6 +23,8 @@ import {
 } from "./razorpayPayment";
 import {
   createOrGetFtwCheckoutDraft,
+  deleteUnpaidFtwCheckout,
+  FTW_CHECKOUT_RECONCILE_INTERVAL_MS,
   FtwInventoryError,
   isFtwOrderId,
   reconcileExpiredFtwReservations,
@@ -39,6 +41,7 @@ declare module "express-session" {
 const OTP_TTL_MS = 5 * 60 * 1000;
 const INDIA_TIME_ZONE = "Asia/Kolkata";
 let ftwReservationReconcileTimer: NodeJS.Timeout | null = null;
+let ftwOrderLifecycleRecoveryTimer: NodeJS.Timeout | null = null;
 
 function getIndiaDateKey(date = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -282,7 +285,65 @@ async function finalizeFtwRazorpayPayment(params: {
   const PendingCheckout = getPendingCheckoutModel();
   const pendingCollection = PendingCheckout.db.db!.collection("pendingcheckouts");
   const order = await orderCollection.findOne({ razorpayOrderId: params.razorpayOrderId });
-  if (!order || !isFtwOrderId(order.orderId) || order.ftwInventoryManagedBy !== "frontend") {
+  if (!order) {
+    const tombstones = OrderModel.db.db!.collection("ftw_checkout_tombstones");
+    const tombstone = await tombstones.findOne({
+      razorpayOrderId: params.razorpayOrderId,
+      state: { $in: ["deleting", "deleted", "late_capture"] },
+    });
+    if (tombstone) {
+      const operationKey = `ftw:${tombstone.orderMongoId}:late-capture:${params.razorpayPaymentId}`;
+      const reconciliationCollection = OrderModel.db.db!.collection("ftw_inventory_reconciliation");
+      await reconciliationCollection.createIndex(
+        { operationKey: 1 },
+        { unique: true, name: "uniq_ftw_inventory_reconciliation" },
+      );
+      await reconciliationCollection.updateOne(
+        { operationKey },
+        {
+          $setOnInsert: {
+            operationKey,
+            orderMongoId: tombstone.orderMongoId,
+            orderId: tombstone.orderId,
+            subHubId: tombstone.subHubId ?? null,
+            subHubName: tombstone.subHubName ?? null,
+            reservationOperationId: tombstone.reservationOperationId ?? null,
+            restoreOperationId: tombstone.restoreOperationId ?? null,
+            razorpayOrderId: params.razorpayOrderId,
+            paymentId: params.razorpayPaymentId,
+            amount: params.amount,
+            reason: "Payment captured after the unpaid FTW order was deleted and inventory restored.",
+            state: "open",
+            createdAt: new Date(),
+          },
+        },
+        { upsert: true },
+      );
+      await tombstones.updateOne(
+        { razorpayOrderId: params.razorpayOrderId },
+        {
+          $set: {
+            state: "late_capture",
+            latePaymentId: params.razorpayPaymentId,
+            latePaymentAmount: params.amount,
+            latePaymentAt: new Date(),
+          },
+        },
+      );
+      console.error(
+        `[FTW payment] Late capture after draft deletion orderId=${tombstone.orderId} ` +
+        `internalOrderId=${tombstone.orderMongoId} operationId=${operationKey} paymentId=${params.razorpayPaymentId}`,
+      );
+      throw new FtwInventoryError("Payment arrived after the unpaid order was removed; reconciliation is required.", {
+        status: 409,
+        code: "FTW_LATE_CAPTURE_AFTER_DELETE",
+      });
+    }
+    throw new FtwInventoryError("No frontend-managed FTW order matches this payment.", {
+      code: "FTW_ORDER_NOT_FOUND",
+    });
+  }
+  if (!isFtwOrderId(order.orderId) || order.ftwInventoryManagedBy !== "frontend") {
     throw new FtwInventoryError("No frontend-managed FTW order matches this payment.", {
       code: "FTW_ORDER_NOT_FOUND",
     });
@@ -363,8 +424,10 @@ async function finalizeFtwRazorpayPayment(params: {
           ftwInventoryState: "reconciliation_required",
           ftwPaymentFinalizedAt: new Date(),
           ftwPaymentFinalizing: false,
+          ftwCheckoutDeleting: false,
           updatedAt: new Date(),
         },
+        $unset: { ftwCheckoutDeletingAt: "" },
       },
     );
     await reconciliationCollection.updateOne(
@@ -1005,21 +1068,66 @@ export async function registerRoutes(
   }
   if (razorpay && !ftwReservationReconcileTimer) {
     ftwReservationReconcileTimer = setInterval(() => {
+      void reconcileExpiredFtwReservations(async (razorpayOrderId) => {
+        const payments = await (razorpay as any).orders.fetchPayments(razorpayOrderId);
+        const successful = (payments.items ?? []).find((payment: any) =>
+          isSuccessfulRazorpayStatus(payment.status)
+        );
+        if (successful) {
+          await finalizeFtwRazorpayPayment({
+            razorpayOrderId,
+            razorpayPaymentId: String(successful.id),
+            amount: Number(successful.amount ?? 0) / 100,
+          });
+        }
+        return payments;
+      }).catch((error) => {
+        console.error("[FTW inventory] Reservation reconciliation job failed:", error);
+      });
+    }, FTW_CHECKOUT_RECONCILE_INTERVAL_MS);
+    ftwReservationReconcileTimer.unref?.();
+  }
+
+  if (razorpay && !ftwOrderLifecycleRecoveryTimer) {
+    ftwOrderLifecycleRecoveryTimer = setInterval(() => {
       void (async () => {
-        await reconcileExpiredFtwReservations(async (razorpayOrderId) => {
-          const payments = await (razorpay as any).orders.fetchPayments(razorpayOrderId);
-          const successful = (payments.items ?? []).find((payment: any) =>
-            isSuccessfulRazorpayStatus(payment.status)
-          );
-          if (successful) {
-            await finalizeFtwRazorpayPayment({
-              razorpayOrderId,
-              razorpayPaymentId: String(successful.id),
-              amount: Number(successful.amount ?? 0) / 100,
-            });
-          }
-          return payments;
-        });
+        const restoredUnpaidFtwDrafts = await getOrderModel().find({
+          ftwInventoryManagedBy: "frontend",
+          ftwInventoryState: "restored",
+          inventoryDeducted: false,
+          ftwInventoryRestoreReason: {
+            $in: ["payment_failed", "payment_cancelled", "payment_expired", "browser_closed", "reservation_failed"],
+          },
+          paymentStatus: { $ne: "paid" },
+          $or: [{ ftwPaymentFinalizedAt: null }, { ftwPaymentFinalizedAt: { $exists: false } }],
+        }).limit(100).lean() as any[];
+        for (const order of restoredUnpaidFtwDrafts) {
+          await deleteUnpaidFtwCheckout(String(order._id)).catch((error) => {
+            console.error(
+              `[FTW checkout] Restored draft deletion recovery failed orderId=${order.orderId} ` +
+              `internalOrderId=${String(order._id)} operationId=${order.ftwInventoryRestoreOperationId}:`,
+              error,
+            );
+          });
+        }
+
+        const staleCheckoutDeletes = await getOrderModel().find({
+          ftwInventoryManagedBy: "frontend",
+          ftwInventoryState: "restored",
+          inventoryDeducted: false,
+          ftwCheckoutDeleting: true,
+          ftwCheckoutDeletingAt: { $lte: new Date(Date.now() - 60 * 1000) },
+          paymentStatus: { $ne: "paid" },
+        }).limit(50).lean() as any[];
+        for (const order of staleCheckoutDeletes) {
+          await deleteUnpaidFtwCheckout(String(order._id)).catch((error) => {
+            console.error(
+              `[FTW checkout] Stale draft deletion recovery failed orderId=${order.orderId} ` +
+              `internalOrderId=${String(order._id)} operationId=${order.ftwInventoryRestoreOperationId}:`,
+              error,
+            );
+          });
+        }
 
         const cancelledFtwOrders = await getOrderModel().find({
           ftwInventoryManagedBy: "frontend",
@@ -1080,10 +1188,10 @@ export async function registerRoutes(
           }
         }
       })().catch((error) => {
-        console.error("[FTW inventory] Reservation reconciliation job failed:", error);
+        console.error("[FTW inventory] Order lifecycle recovery job failed:", error);
       });
     }, 60 * 1000);
-    ftwReservationReconcileTimer.unref?.();
+    ftwOrderLifecycleRecoveryTimer.unref?.();
   }
 
   const fetchVerifiedRazorpayPayment = async (
@@ -1233,7 +1341,19 @@ export async function registerRoutes(
                   amount: Number(previousSuccess.amount ?? 0) / 100,
                 });
               } else {
-                await restoreFtwInventory(String(existingAttempt._id), "payment_cancelled");
+                await OrderModel.collection.updateOne(
+                  {
+                    _id: existingAttempt._id,
+                    ftwInventoryState: { $in: ["reserving", "reserved"] },
+                    paymentStatus: { $ne: "paid" },
+                  },
+                  {
+                    $set: {
+                      ftwCheckoutTerminationRequestedAt: new Date(),
+                      ftwCheckoutTerminationReason: "payment_cancelled",
+                    },
+                  },
+                );
               }
             }
             return res.status(409).json({
@@ -1295,6 +1415,7 @@ export async function registerRoutes(
                     { _id: failedOrder._id, ftwInventoryState: "reserving", inventoryDeducted: { $ne: true } },
                     {
                       $set: {
+                        inventoryDeducted: false,
                         ftwInventoryState: "restored",
                         ftwInventoryRestoreReason: "reservation_failed",
                         status: "cancelled",
@@ -1303,6 +1424,7 @@ export async function registerRoutes(
                     },
                   );
                   await getPendingCheckoutModel().deleteOne({ razorpayOrderId: failedOrder.razorpayOrderId });
+                  await deleteUnpaidFtwCheckout(String(failedOrder._id));
                 }
               } catch (cleanupError) {
                 console.error(`[FTW checkout] Failed to mark reservation attempt ${checkoutAttemptId} as failed:`, cleanupError);
@@ -1409,7 +1531,20 @@ export async function registerRoutes(
           });
           return res.status(200).json({ message: "Payment succeeded; reservation retained" });
         }
-        await restoreFtwInventory(String(failedOrder._id), "payment_failed");
+        await OrderModel.collection.updateOne(
+          {
+            _id: failedOrder._id,
+            ftwInventoryState: { $in: ["reserving", "reserved"] },
+            paymentStatus: { $ne: "paid" },
+          },
+          {
+            $set: {
+              ftwCheckoutTerminationRequestedAt: new Date(),
+              ftwCheckoutTerminationReason: "payment_failed",
+            },
+            $unset: { ftwCheckoutNextPaymentCheckAt: "" },
+          },
+        );
       } catch (failureError) {
         console.error(
           `[Razorpay webhook] Failed-payment recovery orderId=${razorpayOrderId} paymentId=${payment.id}:`,
@@ -1462,6 +1597,25 @@ export async function registerRoutes(
           console.log(`[Razorpay webhook] Non-FTW order already exists for payment ${razorpayPaymentId} — skipping`);
         }
         return res.status(200).json({ message: "Already processed" });
+      }
+
+      const deletedCheckout = await OrderModel.db.db!.collection("ftw_checkout_tombstones").findOne({
+        razorpayOrderId,
+        state: { $in: ["deleting", "deleted", "late_capture"] },
+      });
+      if (deletedCheckout) {
+        try {
+          await finalizeFtwRazorpayPayment({
+            razorpayOrderId,
+            razorpayPaymentId,
+            amount: amountPaid,
+          });
+        } catch (lateCaptureError: any) {
+          if (lateCaptureError?.code !== "FTW_LATE_CAPTURE_AFTER_DELETE") {
+            console.error(`[Razorpay webhook] Late capture reconciliation failed for ${razorpayOrderId}:`, lateCaptureError);
+          }
+        }
+        return res.status(200).json({ message: "Late FTW payment sent to reconciliation" });
       }
 
       // Fetch the pending checkout payload saved at create-order time
@@ -1533,13 +1687,30 @@ export async function registerRoutes(
       );
       if (captured) {
         try {
-          const ftwOrder = await getOrderModel().findOne({ razorpayOrderId: orderId }).lean() as any;
+          const OrderModel = getOrderModel();
+          const ftwOrder = await OrderModel.findOne({ razorpayOrderId: orderId }).lean() as any;
           if (ftwOrder?.ftwInventoryManagedBy === "frontend") {
             await finalizeFtwRazorpayPayment({
               razorpayOrderId: orderId,
               razorpayPaymentId: String(captured.id),
               amount: Number(captured.amount ?? 0) / 100,
             });
+          } else if (!ftwOrder) {
+            const tombstone = await OrderModel.db.db!.collection("ftw_checkout_tombstones").findOne({
+              razorpayOrderId: orderId,
+              state: { $in: ["deleting", "deleted", "late_capture"] },
+            });
+            if (tombstone) {
+              try {
+                await finalizeFtwRazorpayPayment({
+                  razorpayOrderId: orderId,
+                  razorpayPaymentId: String(captured.id),
+                  amount: Number(captured.amount ?? 0) / 100,
+                });
+              } catch (lateCaptureError: any) {
+                if (lateCaptureError?.code !== "FTW_LATE_CAPTURE_AFTER_DELETE") throw lateCaptureError;
+              }
+            }
           }
         } catch (finalizeError) {
           console.error(`[Razorpay] FTW status recovery failed for ${orderId}:`, finalizeError);
@@ -1554,6 +1725,64 @@ export async function registerRoutes(
     } catch (err) {
       console.error("[Razorpay] order-status error:", err);
       return res.status(500).json({ paid: false, message: "Failed to fetch order status" });
+    }
+  });
+
+  app.post("/api/razorpay/heartbeat", async (req, res) => {
+    if (!razorpay) return res.status(503).json({ message: "Payment service not configured" });
+    try {
+      const razorpayOrderId = String(req.body?.razorpayOrderId ?? "");
+      const checkoutAttemptId = String(req.body?.checkoutAttemptId ?? "");
+      if (!razorpayOrderId || !checkoutAttemptId) {
+        return res.status(400).json({ message: "Payment order and checkout attempt are required." });
+      }
+
+      const pendingCollection = getPendingCheckoutModel().db.db!.collection("pendingcheckouts");
+      const pending = await pendingCollection.findOne({ razorpayOrderId });
+      const savedHash = String(pending?.reservationTokenHash ?? "");
+      if (!pending || !/^[a-f0-9]{64}$/i.test(savedHash)) {
+        return res.status(404).json({ message: "FTW checkout is no longer active." });
+      }
+      const suppliedHash = createHash("sha256").update(checkoutAttemptId).digest();
+      const expectedHash = Buffer.from(savedHash, "hex");
+      if (suppliedHash.length !== expectedHash.length || !timingSafeEqual(suppliedHash, expectedHash)) {
+        return res.status(403).json({ message: "Checkout attempt is invalid." });
+      }
+
+      const OrderModel = getOrderModel();
+      const order = await OrderModel.collection.findOne({
+        razorpayOrderId,
+        ftwCheckoutAttemptId: checkoutAttemptId,
+        ftwInventoryManagedBy: "frontend",
+      });
+      if (!order) return res.status(404).json({ message: "FTW checkout is no longer active." });
+      if (order.paymentStatus === "paid" || order.ftwPaymentFinalizedAt) {
+        return res.json({ active: false, paid: true });
+      }
+
+      const heartbeatAt = new Date();
+      const heartbeat = await OrderModel.collection.updateOne(
+        {
+          _id: order._id,
+          ftwInventoryManagedBy: "frontend",
+          ftwInventoryState: "reserved",
+          inventoryDeducted: true,
+          paymentStatus: { $ne: "paid" },
+        },
+        { $set: { ftwCheckoutHeartbeatAt: heartbeatAt } },
+      );
+      if (heartbeat.modifiedCount !== 1) {
+        const latest = await OrderModel.collection.findOne({ _id: order._id });
+        if (latest?.paymentStatus === "paid" || latest?.ftwPaymentFinalizedAt) {
+          return res.json({ active: false, paid: true });
+        }
+        return res.status(409).json({ message: "FTW checkout reservation is no longer active." });
+      }
+      res.setHeader("Cache-Control", "no-store");
+      return res.json({ active: true, serverTime: heartbeatAt.toISOString() });
+    } catch (error: any) {
+      console.error("[FTW checkout] Heartbeat failed:", error);
+      return res.status(500).json({ message: "Could not renew checkout heartbeat." });
     }
   });
 
@@ -1607,25 +1836,27 @@ export async function registerRoutes(
         return res.json({ paid: true, restored: false });
       }
 
-      // beforeunload can also fire when a browser hands off a UPI intent. Keep
-      // the reservation until its server-side expiry check proves it unpaid.
-      if (reason === "browser_closed") {
-        await OrderModel.collection.updateOne(
-          { _id: order._id, ftwInventoryState: "reserved", inventoryDeducted: true },
-          { $set: { ftwBrowserClosedAt: new Date(), updatedAt: new Date() } },
-        );
-        return res.json({
-          restored: false,
-          restoreScheduled: true,
-          expiresAt: order.ftwInventoryExpiresAt ?? null,
-        });
-      }
-
-      const result = await restoreFtwInventory(
-        String(order._id),
-        reason as "payment_failed" | "payment_cancelled" | "payment_expired" | "browser_closed",
+      // End this browser attempt and let the heartbeat reconciler wait for other
+      // tabs, then verify that Razorpay has no successful or still-pending attempt.
+      const requestedAt = new Date();
+      const terminationUpdate: Record<string, any> = {
+        ftwCheckoutTerminationRequestedAt: requestedAt,
+        ftwCheckoutTerminationReason: reason,
+      };
+      if (reason === "browser_closed") terminationUpdate.ftwBrowserClosedAt = requestedAt;
+      await OrderModel.collection.updateOne(
+        { _id: order._id, ftwInventoryState: { $in: ["reserving", "reserved"] } },
+        {
+          $set: terminationUpdate,
+          $unset: { ftwCheckoutNextPaymentCheckAt: "" },
+        },
       );
-      return res.json(result);
+      return res.json({
+        restored: false,
+        restoreScheduled: true,
+        deleteScheduled: true,
+        expiresAt: order.ftwInventoryExpiresAt ?? null,
+      });
     } catch (error: any) {
       console.error("[FTW checkout] Cancel/release request failed:", error);
       return res.status(500).json({ message: error?.message ?? "Could not release the reservation." });

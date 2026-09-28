@@ -4,6 +4,11 @@ import { getHubModels } from "./hubConnections";
 import { generateOrderId, getOrderModel, getPendingCheckoutModel } from "./ordersDb";
 
 export const FTW_RESERVATION_TTL_MS = 30 * 60 * 1000;
+export const FTW_CHECKOUT_HEARTBEAT_STALE_MS = 6 * 1000;
+export const FTW_CHECKOUT_RECONCILE_INTERVAL_MS = 2 * 1000;
+const FTW_PENDING_PAYMENT_GRACE_MS = 2 * 60 * 1000;
+const FTW_PAYMENT_STATUS_RETRY_MS = 15 * 1000;
+const FTW_EMPTY_PAYMENT_STATUS_GRACE_MS = 15 * 1000;
 
 export type FtwBatchAllocation = {
   batchId: string;
@@ -292,6 +297,7 @@ export async function createOrGetFtwCheckoutDraft(params: {
     ftwInventoryOperationId: `ftw:${orderMongoId.toString()}:deduct`,
     ftwInventoryExpiresAt: expiresAt,
     ftwCheckoutAttemptId: params.checkoutAttemptId,
+    ftwCheckoutHeartbeatAt: now,
     ftwRazorpayAmount: params.amount,
     ftwRazorpayCurrency: params.currency,
     ftwPendingWalletAmount: walletPayments.reduce(
@@ -1003,29 +1009,217 @@ export async function restoreFtwInventory(
   return { restored: true };
 }
 
+export async function deleteUnpaidFtwCheckout(orderMongoId: string): Promise<boolean> {
+  if (!Types.ObjectId.isValid(orderMongoId)) return false;
+  const OrderModel = getOrderModel();
+  const orderCollection = getRawCollection(OrderModel, "orders");
+  const order = await orderCollection.findOne({ _id: new Types.ObjectId(orderMongoId) });
+  if (
+    !order ||
+    order.ftwInventoryManagedBy !== "frontend" ||
+    order.ftwInventoryState !== "restored" ||
+    order.inventoryDeducted !== false ||
+    order.paymentStatus === "paid" ||
+    order.ftwPaymentFinalizedAt ||
+    !order.razorpayOrderId ||
+    ![
+      "payment_failed",
+      "payment_cancelled",
+      "payment_expired",
+      "browser_closed",
+      "reservation_failed",
+    ].includes(String(order.ftwInventoryRestoreReason ?? ""))
+  ) {
+    return false;
+  }
+
+  const claim = await orderCollection.updateOne(
+    {
+      _id: order._id,
+      ftwInventoryManagedBy: "frontend",
+      ftwInventoryState: "restored",
+      inventoryDeducted: false,
+      paymentStatus: { $ne: "paid" },
+      $and: [
+        {
+          $or: [
+            { ftwCheckoutDeleting: { $ne: true } },
+            { ftwCheckoutDeletingAt: { $lte: new Date(Date.now() - 60 * 1000) } },
+          ],
+        },
+        { $or: [{ ftwPaymentFinalizedAt: null }, { ftwPaymentFinalizedAt: { $exists: false } }] },
+        { $or: [{ ftwPaymentFinalizing: { $ne: true } }, { ftwPaymentFinalizingAt: { $lte: new Date(Date.now() - 10 * 60 * 1000) } }] },
+      ],
+    },
+    {
+      $set: {
+        ftwCheckoutDeleting: true,
+        ftwCheckoutDeletingAt: new Date(),
+        updatedAt: new Date(),
+      },
+    },
+  );
+  if (claim.modifiedCount !== 1) return false;
+
+  const tombstones = getRawCollection(OrderModel, "ftw_checkout_tombstones");
+  await tombstones.createIndex(
+    { razorpayOrderId: 1 },
+    { unique: true, name: "uniq_ftw_checkout_tombstone_order" },
+  );
+  await tombstones.createIndex(
+    { expiresAt: 1 },
+    { expireAfterSeconds: 0, name: "ttl_ftw_checkout_tombstone" },
+  );
+  const deletedAt = new Date();
+  const tombstone = {
+    razorpayOrderId: String(order.razorpayOrderId ?? ""),
+    orderMongoId: String(order._id),
+    orderId: String(order.orderId ?? ""),
+    checkoutAttemptId: String(order.ftwCheckoutAttemptId ?? ""),
+    subHubId: order.subHubId ?? null,
+    subHubName: order.subHubName ?? null,
+    reservationOperationId: order.ftwInventoryOperationId ?? null,
+    restoreOperationId: order.ftwInventoryRestoreOperationId ?? null,
+    restoreReason: order.ftwInventoryRestoreReason,
+    state: "deleting",
+    deletedAt,
+    expiresAt: new Date(deletedAt.getTime() + 7 * 24 * 60 * 60 * 1000),
+  };
+  await tombstones.updateOne(
+    { razorpayOrderId: tombstone.razorpayOrderId },
+    { $setOnInsert: tombstone },
+    { upsert: true },
+  );
+
+  const deleted = await orderCollection.deleteOne({
+    _id: order._id,
+    razorpayOrderId: order.razorpayOrderId,
+    ftwInventoryManagedBy: "frontend",
+    ftwInventoryState: "restored",
+    inventoryDeducted: false,
+    ftwCheckoutDeleting: true,
+    paymentStatus: { $ne: "paid" },
+    $or: [{ ftwPaymentFinalizedAt: null }, { ftwPaymentFinalizedAt: { $exists: false } }],
+  });
+  if (deleted.deletedCount !== 1) {
+    await orderCollection.updateOne(
+      { _id: order._id, ftwCheckoutDeleting: true },
+      {
+        $set: { ftwCheckoutDeleting: false, updatedAt: new Date() },
+        $unset: { ftwCheckoutDeletingAt: "" },
+      },
+    );
+    await tombstones.deleteOne({
+      razorpayOrderId: tombstone.razorpayOrderId,
+      state: "deleting",
+    });
+    return false;
+  }
+
+  await tombstones.updateOne(
+    { razorpayOrderId: tombstone.razorpayOrderId },
+    { $set: { state: "deleted" } },
+  );
+  await getRawCollection(getPendingCheckoutModel(), "pendingcheckouts").deleteOne({
+    razorpayOrderId: order.razorpayOrderId,
+  });
+  console.info(
+    `[FTW checkout] Deleted unpaid order orderId=${order.orderId} ` +
+    `internalOrderId=${String(order._id)} reason=${order.ftwInventoryRestoreReason}`,
+  );
+  return true;
+}
+
 export async function reconcileExpiredFtwReservations(
   fetchPayments: (razorpayOrderId: string) => Promise<any>,
 ) {
   const OrderModel = getOrderModel();
   const now = new Date();
+  const heartbeatStaleBefore = new Date(now.getTime() - FTW_CHECKOUT_HEARTBEAT_STALE_MS);
   const expired = await OrderModel.find({
     ftwInventoryManagedBy: "frontend",
     ftwInventoryState: { $in: ["reserving", "reserved"] },
-    ftwInventoryExpiresAt: { $lte: now },
     paymentStatus: { $ne: "paid" },
+    $and: [
+      {
+        $or: [
+          { ftwCheckoutHeartbeatAt: { $lte: heartbeatStaleBefore }, ftwInventoryState: "reserved" },
+          {
+            ftwCheckoutHeartbeatAt: null,
+            createdAt: { $lte: heartbeatStaleBefore },
+            ftwInventoryState: "reserved",
+          },
+          { ftwInventoryExpiresAt: { $lte: now } },
+        ],
+      },
+      {
+        $or: [
+          { ftwCheckoutNextPaymentCheckAt: { $exists: false } },
+          { ftwCheckoutNextPaymentCheckAt: null },
+          { ftwCheckoutNextPaymentCheckAt: { $lte: now } },
+        ],
+      },
+    ],
   }).limit(100).lean() as any[];
 
   for (const order of expired) {
     try {
+      const nextPaymentCheckAt = new Date(now.getTime() + FTW_PAYMENT_STATUS_RETRY_MS);
+      const paymentCheckClaim = await OrderModel.collection.updateOne(
+        {
+          _id: order._id,
+          paymentStatus: { $ne: "paid" },
+          $or: [
+            { ftwCheckoutNextPaymentCheckAt: { $exists: false } },
+            { ftwCheckoutNextPaymentCheckAt: null },
+            { ftwCheckoutNextPaymentCheckAt: { $lte: now } },
+          ],
+        },
+        { $set: { ftwCheckoutNextPaymentCheckAt: nextPaymentCheckAt } },
+      );
+      if (paymentCheckClaim.modifiedCount !== 1) continue;
+
+      const payments = await fetchPayments(String(order.razorpayOrderId));
+      const items: any[] = payments?.items ?? [];
+      const hasSuccessfulPayment = items.some((payment) =>
+        payment?.status === "captured" || payment?.status === "authorized"
+      );
+      if (hasSuccessfulPayment) continue;
+      const hasUnresolvedPayment = items.some((payment) =>
+        !["failed", "refunded"].includes(String(payment?.status ?? "").toLowerCase())
+      );
+      const expiresAt = order.ftwInventoryExpiresAt
+        ? new Date(order.ftwInventoryExpiresAt)
+        : new Date(new Date(order.createdAt ?? now).getTime() + FTW_RESERVATION_TTL_MS);
+      const latestOrder = await OrderModel.collection.findOne(
+        { _id: order._id },
+        { projection: { paymentStatus: 1, ftwPaymentFinalizedAt: 1, ftwCheckoutHeartbeatAt: 1 } },
+      );
+      if (latestOrder?.paymentStatus === "paid" || latestOrder?.ftwPaymentFinalizedAt) continue;
+      const latestHeartbeatAt = latestOrder?.ftwCheckoutHeartbeatAt
+        ? new Date(latestOrder.ftwCheckoutHeartbeatAt).getTime()
+        : 0;
+      const heartbeatIsFresh = latestHeartbeatAt > Date.now() - FTW_CHECKOUT_HEARTBEAT_STALE_MS;
+      const heartbeatBaseTime = latestHeartbeatAt || new Date(order.createdAt ?? now).getTime();
+      const terminationRequestedAt = order.ftwCheckoutTerminationRequestedAt
+        ? new Date(order.ftwCheckoutTerminationRequestedAt).getTime()
+        : 0;
+      const noPaymentStatusGraceActive =
+        items.length === 0 &&
+        Date.now() < Math.max(
+          heartbeatBaseTime + FTW_CHECKOUT_HEARTBEAT_STALE_MS,
+          terminationRequestedAt,
+        ) + FTW_EMPTY_PAYMENT_STATUS_GRACE_MS &&
+        Date.now() < expiresAt.getTime() + FTW_PENDING_PAYMENT_GRACE_MS;
+
       if (order.ftwInventoryState === "reserving") {
         const subHub = await resolveOrderSubHub(order);
         const { Product } = await getHubModels(subHub.dbName);
         const operationCollection = getRawCollection(Product, "ftw_inventory_operations");
         const reservation = await operationCollection.findOne({
           operationKey: order.ftwInventoryOperationId,
-          state: "reserved",
         });
-        if (reservation) {
+        if (reservation?.state === "reserved") {
           await OrderModel.collection.updateOne(
             { _id: order._id, ftwInventoryState: "reserving" },
             {
@@ -1039,32 +1233,63 @@ export async function reconcileExpiredFtwReservations(
           );
           order.ftwInventoryState = "reserved";
           order.inventoryDeducted = true;
+        } else if (
+          reservation ||
+          (heartbeatIsFresh && Date.now() < expiresAt.getTime()) ||
+          noPaymentStatusGraceActive ||
+          (hasUnresolvedPayment && now.getTime() < expiresAt.getTime() + FTW_PENDING_PAYMENT_GRACE_MS)
+        ) {
+          continue;
         } else {
-          await OrderModel.collection.updateOne(
-            { _id: order._id, ftwInventoryState: "reserving" },
+          const failedReservation = await OrderModel.collection.updateOne(
             {
-              $set: { ftwInventoryState: "restored", status: "cancelled", updatedAt: new Date() },
+              _id: order._id,
+              ftwInventoryState: "reserving",
+              paymentStatus: { $ne: "paid" },
+              $or: [{ ftwPaymentFinalizedAt: null }, { ftwPaymentFinalizedAt: { $exists: false } }],
+            },
+            {
+              $set: {
+                inventoryDeducted: false,
+                ftwInventoryState: "restored",
+                ftwInventoryRestoreReason: "reservation_failed",
+                status: "cancelled",
+                updatedAt: new Date(),
+              },
               $unset: { ftwInventoryExpiresAt: "" },
             },
           );
-          await getRawCollection(getPendingCheckoutModel(), "pendingcheckouts").deleteOne({
-            razorpayOrderId: order.razorpayOrderId,
-          });
+          if (failedReservation.modifiedCount === 1) {
+            await deleteUnpaidFtwCheckout(String(order._id));
+          }
           continue;
         }
       }
 
-      const payments = await fetchPayments(String(order.razorpayOrderId));
-      const items: any[] = payments?.items ?? [];
-      const hasSuccessfulPayment = items.some((payment) =>
-        payment?.status === "captured" || payment?.status === "authorized"
-      );
-      if (hasSuccessfulPayment) continue;
-      await restoreFtwInventory(
-        String(order._id),
-        order.ftwBrowserClosedAt ? "browser_closed" : "payment_expired",
-      );
+      if (heartbeatIsFresh && Date.now() < expiresAt.getTime()) continue;
+      if (noPaymentStatusGraceActive) continue;
+      if (hasUnresolvedPayment && now.getTime() < expiresAt.getTime() + FTW_PENDING_PAYMENT_GRACE_MS) {
+        continue;
+      }
+      const reason = order.ftwCheckoutTerminationReason ??
+        (order.ftwBrowserClosedAt ? "browser_closed" : (expiresAt <= now ? "payment_expired" : "browser_closed"));
+      const restoreReason = [
+        "payment_failed",
+        "payment_cancelled",
+        "payment_expired",
+        "browser_closed",
+      ].includes(String(reason))
+        ? reason as "payment_failed" | "payment_cancelled" | "payment_expired" | "browser_closed"
+        : "browser_closed";
+      const restoration = await restoreFtwInventory(String(order._id), restoreReason);
+      if (restoration.restored && !restoration.reconciliationRequired) {
+        await deleteUnpaidFtwCheckout(String(order._id));
+      }
     } catch (error) {
+      await OrderModel.collection.updateOne(
+        { _id: order._id, paymentStatus: { $ne: "paid" } },
+        { $set: { ftwCheckoutNextPaymentCheckAt: new Date(Date.now() + FTW_PAYMENT_STATUS_RETRY_MS) } },
+      ).catch(() => {});
       logInventoryFailure(order, String(order.ftwInventoryOperationId ?? "reconcile"), "", error);
     }
   }

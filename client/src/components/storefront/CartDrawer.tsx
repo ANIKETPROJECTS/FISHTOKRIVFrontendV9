@@ -225,6 +225,54 @@ export function CartDrawer() {
   const returningFromUpiRef = useRef(false);
   const checkoutAttemptIdRef = useRef<string | null>(null);
   const paymentFailureHandledRef = useRef(false);
+  const checkoutHeartbeatTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
+  const checkoutHeartbeatInFlightRef = useRef(false);
+  const checkoutHeartbeatGenerationRef = useRef(0);
+
+  const stopFtwCheckoutHeartbeat = () => {
+    checkoutHeartbeatGenerationRef.current += 1;
+    if (checkoutHeartbeatTimerRef.current !== null) {
+      window.clearInterval(checkoutHeartbeatTimerRef.current);
+      checkoutHeartbeatTimerRef.current = null;
+    }
+    checkoutHeartbeatInFlightRef.current = false;
+  };
+
+  const startFtwCheckoutHeartbeat = (razorpayOrderId: string, checkoutAttemptId: string) => {
+    stopFtwCheckoutHeartbeat();
+    const generation = checkoutHeartbeatGenerationRef.current;
+    const sendHeartbeat = async () => {
+      if (generation !== checkoutHeartbeatGenerationRef.current) return;
+      if (checkoutHeartbeatInFlightRef.current) return;
+      checkoutHeartbeatInFlightRef.current = true;
+      try {
+        const response = await fetch("/api/razorpay/heartbeat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ razorpayOrderId, checkoutAttemptId }),
+          keepalive: true,
+        });
+        const result = await response.json().catch(() => null);
+        if (
+          generation === checkoutHeartbeatGenerationRef.current &&
+          (response.status === 403 || response.status === 404 || response.status === 409 ||
+            result?.paid === true || result?.active === false)
+        ) {
+          stopFtwCheckoutHeartbeat();
+        }
+      } catch {
+        // The server-side stale-heartbeat reconciler remains authoritative.
+      } finally {
+        if (generation === checkoutHeartbeatGenerationRef.current) {
+          checkoutHeartbeatInFlightRef.current = false;
+        }
+      }
+    };
+    void sendHeartbeat();
+    checkoutHeartbeatTimerRef.current = window.setInterval(() => {
+      void sendHeartbeat();
+    }, 1000);
+  };
   const [paymentMethod, setPaymentMethod] = useState<"cod" | "online">("online");
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const [showUnserviceablePopup, setShowUnserviceablePopup] = useState(false);
@@ -1032,6 +1080,9 @@ export function CartDrawer() {
       }
       const { order_id, amount: rzpAmount, currency, checkoutAttemptId } = await res.json();
       if (checkoutAttemptId) checkoutAttemptIdRef.current = checkoutAttemptId;
+      if (checkoutAttemptIdRef.current) {
+        startFtwCheckoutHeartbeat(order_id, checkoutAttemptIdRef.current);
+      }
 
       const options = {
         key: import.meta.env.VITE_RAZORPAY_KEY_ID,
@@ -1056,6 +1107,7 @@ export function CartDrawer() {
           orderClaimedRef.current = true;
           // Mark as succeeded and clear pending UPI refs so the visibilitychange listener doesn't double-process
           paymentSucceededRef.current = true;
+          stopFtwCheckoutHeartbeat();
           pendingRzpOrderIdRef.current = null;
           pendingSelectedAddressRef.current = null;
           try {
@@ -1128,6 +1180,7 @@ export function CartDrawer() {
             }
             // User closed the modal. The server checks payment status before
             // restoring stock so an already captured payment is never reversed.
+            stopFtwCheckoutHeartbeat();
             const attemptId = checkoutAttemptIdRef.current;
             if (attemptId) {
               void fetch("/api/razorpay/cancel-order", {
@@ -1177,6 +1230,7 @@ export function CartDrawer() {
       const rzp = new (window as any).Razorpay(options);
       rzp.on("payment.failed", (response: any) => {
         paymentFailureHandledRef.current = true;
+        stopFtwCheckoutHeartbeat();
         try { rzp.close(); } catch { /* checkout may already be closed */ }
         const attemptId = checkoutAttemptIdRef.current;
         if (attemptId) {
@@ -1203,6 +1257,7 @@ export function CartDrawer() {
       });
       rzp.open();
     } catch {
+      stopFtwCheckoutHeartbeat();
       toast({ title: "Payment failed. Please try again.", variant: "destructive" });
       setIsProcessingPayment(false);
       setIsCartOpen(true);
@@ -1218,6 +1273,10 @@ export function CartDrawer() {
       document.body.appendChild(script);
     }
   }, [isCartOpen]);
+
+  useEffect(() => {
+    return () => stopFtwCheckoutHeartbeat();
+  }, []);
 
   useEffect(() => {
     const handleBeforeUnload = () => {
@@ -1283,6 +1342,7 @@ export function CartDrawer() {
         }
         orderClaimedRef.current = true;
         paymentSucceededRef.current = true;
+        stopFtwCheckoutHeartbeat();
         pendingRzpOrderIdRef.current = null;
 
         createOrder({ ...buildOrderPayload(selected, statusData.paymentId), razorpayOrderId: orderId }, {
