@@ -73,6 +73,24 @@ const orderSchema = new mongoose.Schema(
     timeslotStart: { type: String, default: null },
     timeslotEnd: { type: String, default: null },
     inventoryDeducted: { type: Boolean, default: false },
+    ftwInventoryManagedBy: { type: String, default: null },
+    ftwInventoryState: { type: String, default: null },
+    ftwInventoryOperationId: { type: String, default: null },
+    ftwInventoryAllocations: { type: mongoose.Schema.Types.Mixed, default: null },
+    ftwInventoryExpiresAt: { type: Date, default: null },
+    ftwInventoryRestoring: { type: Boolean, default: false },
+    ftwInventoryRestoringAt: { type: Date, default: null },
+    ftwBrowserClosedAt: { type: Date, default: null },
+    ftwInventoryRestoreOperationId: { type: String, default: null },
+    ftwInventoryRestoreReason: { type: String, default: null },
+    ftwCheckoutAttemptId: { type: String, default: null },
+    ftwRazorpayAmount: { type: Number, default: null },
+    ftwRazorpayCurrency: { type: String, default: null },
+    ftwPendingWalletAmount: { type: Number, default: 0 },
+    ftwWalletDeductedAt: { type: Date, default: null },
+    ftwPaymentFinalizing: { type: Boolean, default: false },
+    ftwPaymentFinalizingAt: { type: Date, default: null },
+    ftwPaymentFinalizedAt: { type: Date, default: null },
     upiTransactionId: { type: String, default: null },
     razorpayOrderId: { type: String, default: null },
     createdAt: { type: Date, default: Date.now },
@@ -80,6 +98,14 @@ const orderSchema = new mongoose.Schema(
     orderId: { type: String },
   },
   { versionKey: false }
+);
+orderSchema.index(
+  { ftwCheckoutAttemptId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { ftwCheckoutAttemptId: { $type: "string" } },
+    name: "uniq_ftw_checkout_attempt",
+  },
 );
 
 export async function connectOrdersDb() {
@@ -109,6 +135,10 @@ const pendingCheckoutSchema = new mongoose.Schema(
   {
     razorpayOrderId: { type: String, required: true, unique: true, index: true },
     orderPayload: { type: mongoose.Schema.Types.Mixed, required: true },
+    orderMongoId: { type: String, default: null },
+    checkoutAttemptId: { type: String, default: null },
+    reservationTokenHash: { type: String, default: null },
+    expiresAt: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now, expires: 86400 }, // 24h TTL
   },
   { versionKey: false }

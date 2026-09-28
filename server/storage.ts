@@ -354,17 +354,30 @@ export class MongoStorage implements IStorage {
       const update = {
         $push: { orders: embeddedOrder },
         $set: { updatedAt: new Date() },
-        $setOnInsert: { createdAt: new Date(), addresses: [] },
       };
+      const notAlreadyEmbedded = { "orders.orderId": { $ne: order.orderId } };
 
       // Address phone numbers can differ from the account phone. Prefer the
       // account identity for order history, then retain the phone fallback
       // for legacy/webhook orders that have no customerId.
-      const accountDoc = customerId
-        ? await CustomerDbModel.findByIdAndUpdate(customerId, update, { new: true })
-        : null;
-      if (!accountDoc) {
-        await CustomerDbModel.findOneAndUpdate({ phone }, update, { upsert: true });
+      if (customerId) {
+        const accountResult = await CustomerDbModel.updateOne(
+          { _id: customerId, ...notAlreadyEmbedded },
+          update,
+        );
+        if (accountResult.matchedCount > 0) return;
+        const accountExists = await CustomerDbModel.exists({ _id: customerId });
+        if (accountExists) return;
+      }
+
+      const phoneResult = await CustomerDbModel.updateOne(
+        { phone, ...notAlreadyEmbedded },
+        update,
+      );
+      if (phoneResult.matchedCount > 0) return;
+      const phoneExists = await CustomerDbModel.exists({ phone });
+      if (!phoneExists) {
+        await CustomerDbModel.create({ phone, orders: [embeddedOrder] });
       }
     } catch (err) {
       console.error("Failed to push order to customer document:", err);

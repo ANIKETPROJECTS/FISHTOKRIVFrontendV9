@@ -12,6 +12,22 @@ const inventoryBatchSchema = new mongoose.Schema({
   remainingTime: { type: String, default: null },
 });
 
+// The FishTokri Admin app owns this batch array. Keep its fields available to
+// storefront inventory operations without changing the existing
+// inventoryBatches flow used by other checkout paths.
+const adminInventoryBatchSchema = new mongoose.Schema(
+  {
+    batchNumber: { type: String, default: "" },
+    quantity: { type: Number, required: true },
+    receivedDate: { type: Date, default: null },
+    expiryDate: { type: Date, default: null },
+    shelfLifeDays: { type: Number, default: null },
+    notes: { type: String, default: "" },
+    createdAt: { type: Date, default: Date.now },
+  },
+  { _id: true, strict: false },
+);
+
 const productSchema = new mongoose.Schema({
   name: { type: String, required: true },
   category: { type: String, required: true },
@@ -45,6 +61,7 @@ const productSchema = new mongoose.Schema({
   },
   couponIds: { type: [mongoose.Schema.Types.ObjectId], default: [] },
   inventoryBatches: { type: [inventoryBatchSchema], default: [] },
+  batches: { type: [adminInventoryBatchSchema], default: undefined },
   recipes: [{
     title: { type: String },
     description: { type: String },
@@ -144,6 +161,7 @@ const timeslotSchema = new mongoose.Schema({
   todaysOrderCount: { type: Number, default: 0 },
   nextDayOrderCount: { type: Number, default: 0 },
   limitedByOrders: { type: Boolean, default: false },
+  ftwCountedOrderIds: { type: [String], default: [] },
   activeDays: [{ day: { type: String }, status: { type: String, enum: ["on", "off"], default: "on" } }],
 });
 
