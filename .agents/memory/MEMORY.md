@@ -4,11 +4,10 @@
 - [Order schema strips unknown fields](order-schema-zod.md) — new order payload fields MUST be added to insertOrderRequestSchema in shared/schema.ts or Zod silently drops them before the route handler sees them.
 - [.replit userenv secrets exposure](dotreplit-secrets-check.md) — check .replit's [userenv.shared] for committed plaintext credentials during import setup; migrate to Secrets/env vars and rewrite via verifyAndReplaceDotReplit.
 - [Delivery charge checkout race](delivery-charge-race.md) — checkout must gate submit on `isHubReady`; async pincode-config fetch can otherwise let a ₹0 charge slip through.
-- [Razorpay webhook safety net](razorpay-webhook.md) — verify provider state; explicit close gets a quick recheck, while heartbeat-only expiry keeps a longer empty-status grace.
+- [Razorpay webhook safety net](razorpay-webhook.md) — POST /api/webhooks/razorpay creates missed orders; needs RAZORPAY_WEBHOOK_SECRET env var; pending checkouts stored in MongoDB orders DB (TTL 24h).
 - [TypeScript check heap limit](typescript-check-heap.md) — repository-wide tsc can exhaust Node memory here; use the production build as compile verification.
 - [Environment precedence](env-precedence.md) — keep ecosystem defaults intact; runtime Replit Secrets override them in the launcher.
 - [Preorder date-specific slots](preorder-date-slots.md) — preorder checkout selects a future date and filters slots by configured active weekdays.
 - [Same-day slot cutoff](same-day-slot-cutoff.md) — enforce the 30-minute cutoff server-side in India time; stale carts can submit after the UI hides a slot.
 - [Cross-channel inventory mismatch](inventory-channel-mismatch.md) — FTS and FTW must share one atomic stock field; external batches and storefront inventoryBatches are not interchangeable.
-- [FTW cross-database coordination](ftw-inventory-coordination.md) — serialize payment finalization and restoration in Orders DB before mutating a sub-hub's inventory transaction.
 - [Production logging and polling](production-logging-and-polling.md) — production API logs stay concise; live catalog refresh is explicit rather than global.

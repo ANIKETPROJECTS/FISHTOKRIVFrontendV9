@@ -95,7 +95,6 @@ const customerSchema = new mongoose.Schema({
   email: { type: String, default: null },
   dateOfBirth: { type: String, default: null },
   walletBalance: { type: Number, default: 0 },
-  ftwWalletDeductedOrderIds: { type: [String], default: [] },
   addresses: { type: [customerAddressSchema], default: [] },
   orders: { type: [embeddedOrderSchema], default: [] },
   activeCoupons: { type: [activeCouponEntrySchema], default: [] },

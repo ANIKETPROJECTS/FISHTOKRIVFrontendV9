@@ -1,22 +1,44 @@
 ---
 name: Razorpay webhook safety net
-description: Treat Razorpay's verified server-side state as authoritative when browser payment callbacks are missed.
+description: How the payment.captured webhook recovers orders lost when the browser closes after payment but before the client handler fires.
 ---
 
-Browser callbacks, visibility events, and unload beacons are best-effort. A customer can pay successfully even when the page never finishes its callback.
+## The problem
+Client-side Razorpay handler (`options.handler`) calls `/api/orders` to create the FishTokri order. If the browser closes after Razorpay captures the payment but before that call completes, money is taken but no order is created.
+
+## The fix (implemented)
+
+The storefront must treat a verified successful Razorpay result as the only authority for FTW payment state. Delivery date, schedule type, and timeslot do not affect this decision.
+
+### Pending checkout store
+- When `/api/razorpay/create-order` is called, the server saves the full pre-payment order payload (everything except `razorpayPaymentId`) to a `PendingCheckout` MongoDB collection on the `orders` DB.
+- TTL: 24 hours (matches Razorpay's webhook retry window).
+- Keyed by `razorpayOrderId` (the Razorpay `order_id`).
+
+### Webhook endpoint
+`POST /api/webhooks/razorpay`
+- Verifies `X-Razorpay-Signature` header via HMAC-SHA256 using `RAZORPAY_WEBHOOK_SECRET` and `req.rawBody` (captured by `express.json`'s verify callback in `server/index.ts`).
+- Handles `payment.captured` event only; all others return 200 immediately.
+- Idempotency: checks `OrderModel` for existing `razorpayOrderId` or `payments.reference` before proceeding; an existing FTW document is repaired rather than returned with stale unpaid metadata.
+- Fetches `PendingCheckout` by `razorpayOrderId`, merges actual payment details, then calls `http://localhost:${PORT}/api/orders` internally — reuses all inventory deduction, coupon, and WhatsApp logic.
+- Always returns 200 to prevent Razorpay retries on non-transient errors.
+
+### Order schema
+`razorpayOrderId` field added to `orderSchema` in `server/ordersDb.ts` and to `insertOrderRequestSchema` / `InsertOrderRequest` in `shared/schema.ts`.
+
+### Payment invariant
+- The server confirms the Razorpay payment ID belongs to the submitted Razorpay order and has a successful status before creating or repairing an order.
+- Verified FTW + Razorpay state uses `paymentStatus: "paid"`, `dueAmount: 0`, `upiVariant: "RZPAY"`, the canonical `upiTransactionId`, and one idempotent UPI payment entry.
+- Callback retries replace the existing UPI entry rather than appending duplicates.
+
+### Client changes (`CartDrawer.tsx`)
+- Calls `buildOrderPayload(selected)` (no paymentId) before the Razorpay modal, sends result as `orderPayload` alongside `amount` to `/api/razorpay/create-order`.
+- Both `createOrder` call sites (modal handler + UPI-resume visibilitychange) now spread `razorpayOrderId: order_id` (or `razorpayOrderId: orderId`) into the payload for deduplication.
+
+## Setup required
+1. Razorpay Dashboard → Settings → Webhooks → add URL: `https://<domain>/api/webhooks/razorpay`
+2. Select event: `payment.captured`
+3. Copy webhook secret → set as `RAZORPAY_WEBHOOK_SECRET` env var.
 
 **Why:**
-Without server-side recovery, a captured payment can be lost when the browser closes, the network drops, or a callback is retried.
-
-**How to apply:**
-- Persist the checkout draft before opening payment so a server webhook can recover it.
-- Verify webhook signatures and provider-side payment status; never trust a browser's claimed payment result.
-- Make callbacks and webhook retries idempotent.
-- Check provider state before restoring an unpaid reservation. Unload beacons may report browser closure, but the server-side expiry reconciler remains authoritative.
-- Keep pending-checkout retention aligned with the payment provider's retry window and configure webhook secrets through workspace secrets.
-
-For FTW checkout cleanup, use a token-validated heartbeat as a liveness signal, not proof that payment failed. An explicit close signal can use a short provider recheck, but a heartbeat newer than that signal means another tab may still be active. Preserve provider-pending attempts through the reservation TTL and grace period; delete only after unpaid status is established and stock restoration succeeds. Keep a short-lived tombstone so late captures are sent to reconciliation.
-
-**Why:** UPI app handoffs can pause browser JavaScript, and provider payment records can lag a tab close. A fast cleanup must not turn either condition into a lost successful payment.
-
-**How to apply:** On explicit close, recheck provider state quickly and proceed only if no newer heartbeat or unresolved payment exists. For heartbeat-only loss, retain the longer empty-provider grace and provider polling backoff. Keep finalization able to detect deletion tombstones.
+Without this, any browser/network interruption after payment success silently loses the order. Razorpay retries webhooks for 24 hours, so a server restart during that window will still recover the order.

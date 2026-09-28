@@ -178,25 +178,6 @@ function isPreorderTimeslotAllowedForItems(
   });
 }
 
-const FTW_CHECKOUT_ATTEMPT_STORAGE_KEY = "fishtokri:ftw-checkout-attempt";
-
-function getOrCreateFtwCheckoutAttemptId(): string {
-  const existing = window.localStorage.getItem(FTW_CHECKOUT_ATTEMPT_STORAGE_KEY);
-  if (existing && /^[a-f0-9]{48}$/.test(existing)) return existing;
-  const bytes = new Uint8Array(24);
-  window.crypto.getRandomValues(bytes);
-  const created = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  window.localStorage.setItem(FTW_CHECKOUT_ATTEMPT_STORAGE_KEY, created);
-  return created;
-}
-
-function clearStoredFtwCheckoutAttemptId(attemptId?: string | null) {
-  const stored = window.localStorage.getItem(FTW_CHECKOUT_ATTEMPT_STORAGE_KEY);
-  if (!attemptId || stored === attemptId) {
-    window.localStorage.removeItem(FTW_CHECKOUT_ATTEMPT_STORAGE_KEY);
-  }
-}
-
 export function CartDrawer() {
   const { isCartOpen, setIsCartOpen, items, updateQuantity, updateInstruction, totalPrice, clearCart, appliedCoupon, setAppliedCoupon, discountAmount, computeMaxQty } = useCart();
   const { mutate: createOrder, isPending } = useCreateOrder();
@@ -223,56 +204,6 @@ export function CartDrawer() {
   const pendingRzpOrderIdRef = useRef<string | null>(null);
   const pendingSelectedAddressRef = useRef<any>(null);
   const returningFromUpiRef = useRef(false);
-  const checkoutAttemptIdRef = useRef<string | null>(null);
-  const paymentFailureHandledRef = useRef(false);
-  const checkoutHeartbeatTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
-  const checkoutHeartbeatInFlightRef = useRef(false);
-  const checkoutHeartbeatGenerationRef = useRef(0);
-
-  const stopFtwCheckoutHeartbeat = () => {
-    checkoutHeartbeatGenerationRef.current += 1;
-    if (checkoutHeartbeatTimerRef.current !== null) {
-      window.clearInterval(checkoutHeartbeatTimerRef.current);
-      checkoutHeartbeatTimerRef.current = null;
-    }
-    checkoutHeartbeatInFlightRef.current = false;
-  };
-
-  const startFtwCheckoutHeartbeat = (razorpayOrderId: string, checkoutAttemptId: string) => {
-    stopFtwCheckoutHeartbeat();
-    const generation = checkoutHeartbeatGenerationRef.current;
-    const sendHeartbeat = async () => {
-      if (generation !== checkoutHeartbeatGenerationRef.current) return;
-      if (checkoutHeartbeatInFlightRef.current) return;
-      checkoutHeartbeatInFlightRef.current = true;
-      try {
-        const response = await fetch("/api/razorpay/heartbeat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ razorpayOrderId, checkoutAttemptId }),
-          keepalive: true,
-        });
-        const result = await response.json().catch(() => null);
-        if (
-          generation === checkoutHeartbeatGenerationRef.current &&
-          (response.status === 403 || response.status === 404 || response.status === 409 ||
-            result?.paid === true || result?.active === false)
-        ) {
-          stopFtwCheckoutHeartbeat();
-        }
-      } catch {
-        // The server-side stale-heartbeat reconciler remains authoritative.
-      } finally {
-        if (generation === checkoutHeartbeatGenerationRef.current) {
-          checkoutHeartbeatInFlightRef.current = false;
-        }
-      }
-    };
-    void sendHeartbeat();
-    checkoutHeartbeatTimerRef.current = window.setInterval(() => {
-      void sendHeartbeat();
-    }, 1000);
-  };
   const [paymentMethod, setPaymentMethod] = useState<"cod" | "online">("online");
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const [showUnserviceablePopup, setShowUnserviceablePopup] = useState(false);
@@ -880,7 +811,6 @@ export function CartDrawer() {
       price: i.price,
       unit: (i as any).unit ?? null,
       imageUrl: i.imageUrl ?? null,
-      isCombo: i.isCombo === true,
     }));
     const slotLabel = selectedTimeslot!.isInstant ? "Instant Delivery (Porter)" : getAdjustedSlotLabel(selectedTimeslot!);
     const instantCharge = selectedTimeslot!.isInstant ? (selectedTimeslot!.extraCharge ?? 0) : 0;
@@ -1050,26 +980,14 @@ export function CartDrawer() {
       // it as a pending checkout. The webhook uses this to reconstruct the order if
       // the browser closes before the client-side handler fires.
       const pendingOrderPayload = buildOrderPayload(selected);
-      if (!checkoutAttemptIdRef.current) {
-        checkoutAttemptIdRef.current = getOrCreateFtwCheckoutAttemptId();
-      }
-      paymentFailureHandledRef.current = false;
 
       const res = await fetch("/api/razorpay/create-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          amount: finalTotal,
-          orderPayload: pendingOrderPayload,
-          checkoutAttemptId: checkoutAttemptIdRef.current,
-        }),
+        body: JSON.stringify({ amount: finalTotal, orderPayload: pendingOrderPayload }),
       });
       if (!res.ok) {
         const errorData = await res.json().catch(() => null);
-        if (errorData?.code && errorData.code !== "INVENTORY_OPERATION_INCOMPLETE") {
-          clearStoredFtwCheckoutAttemptId(checkoutAttemptIdRef.current);
-          checkoutAttemptIdRef.current = null;
-        }
         toast({
           title: errorData?.message || "Could not initiate payment. Please try again.",
           variant: "destructive",
@@ -1078,11 +996,7 @@ export function CartDrawer() {
         setIsCartOpen(true);
         return;
       }
-      const { order_id, amount: rzpAmount, currency, checkoutAttemptId } = await res.json();
-      if (checkoutAttemptId) checkoutAttemptIdRef.current = checkoutAttemptId;
-      if (checkoutAttemptIdRef.current) {
-        startFtwCheckoutHeartbeat(order_id, checkoutAttemptIdRef.current);
-      }
+      const { order_id, amount: rzpAmount, currency } = await res.json();
 
       const options = {
         key: import.meta.env.VITE_RAZORPAY_KEY_ID,
@@ -1107,7 +1021,6 @@ export function CartDrawer() {
           orderClaimedRef.current = true;
           // Mark as succeeded and clear pending UPI refs so the visibilitychange listener doesn't double-process
           paymentSucceededRef.current = true;
-          stopFtwCheckoutHeartbeat();
           pendingRzpOrderIdRef.current = null;
           pendingSelectedAddressRef.current = null;
           try {
@@ -1123,21 +1036,6 @@ export function CartDrawer() {
             const verifyData = await verifyRes.json();
             if (!verifyData.verified) {
               paymentSucceededRef.current = false;
-              const attemptId = checkoutAttemptIdRef.current;
-              if (attemptId) {
-                void fetch("/api/razorpay/cancel-order", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    razorpayOrderId: order_id,
-                    checkoutAttemptId: attemptId,
-                    reason: "payment_failed",
-                  }),
-                }).finally(() => {
-                  clearStoredFtwCheckoutAttemptId(attemptId);
-                  checkoutAttemptIdRef.current = null;
-                });
-              }
               toast({ title: "Payment verification failed. Contact support.", variant: "destructive" });
               setIsProcessingPayment(false);
               return;
@@ -1151,8 +1049,6 @@ export function CartDrawer() {
                 setUseWallet(false);
                 setIsProcessingPayment(false);
                 paymentSucceededRef.current = false;
-                clearStoredFtwCheckoutAttemptId(checkoutAttemptIdRef.current);
-                checkoutAttemptIdRef.current = null;
               },
               onError: (err: any) => {
                 paymentSucceededRef.current = false;
@@ -1171,51 +1067,12 @@ export function CartDrawer() {
           ondismiss: () => {
             // Suppress if payment already succeeded OR if we're actively polling after returning from a UPI app
             if (paymentSucceededRef.current || returningFromUpiRef.current) return;
-            if (paymentFailureHandledRef.current) {
-              pendingRzpOrderIdRef.current = null;
-              pendingSelectedAddressRef.current = null;
-              setIsProcessingPayment(false);
-              setIsCartOpen(true);
-              return;
-            }
-            // User closed the modal. The server checks payment status before
-            // restoring stock so an already captured payment is never reversed.
-            stopFtwCheckoutHeartbeat();
-            const attemptId = checkoutAttemptIdRef.current;
-            if (attemptId) {
-              void fetch("/api/razorpay/cancel-order", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  razorpayOrderId: order_id,
-                  checkoutAttemptId: attemptId,
-                  reason: "payment_cancelled",
-                }),
-              }).then(async (cancelRes) => {
-                const cancelData = await cancelRes.json().catch(() => null);
-                if (cancelRes.ok && cancelData?.paid) {
-                  paymentSucceededRef.current = true;
-                  setIsSuccess(true);
-                  clearCart();
-                  setUseWallet(false);
-                  toast({ title: "Payment received", description: "Your order is confirmed." });
-                }
-              }).catch(() => {
-                // The expiry reconciler remains authoritative if this request fails.
-              }).finally(() => {
-                clearStoredFtwCheckoutAttemptId(attemptId);
-                checkoutAttemptIdRef.current = null;
-                setIsProcessingPayment(false);
-              });
-            } else {
-              setIsProcessingPayment(false);
-            }
+            // User closed the modal — treat as cancellation and reset state
             pendingRzpOrderIdRef.current = null;
             pendingSelectedAddressRef.current = null;
+            setIsProcessingPayment(false);
             setIsCartOpen(true);
-            if (attemptId) {
-              toast({ title: "Payment cancelled", variant: "destructive" });
-            }
+            toast({ title: "Payment cancelled", variant: "destructive" });
           },
         },
         theme: { color: "#364F9F" },
@@ -1228,36 +1085,8 @@ export function CartDrawer() {
       orderClaimedRef.current = false;
 
       const rzp = new (window as any).Razorpay(options);
-      rzp.on("payment.failed", (response: any) => {
-        paymentFailureHandledRef.current = true;
-        stopFtwCheckoutHeartbeat();
-        try { rzp.close(); } catch { /* checkout may already be closed */ }
-        const attemptId = checkoutAttemptIdRef.current;
-        if (attemptId) {
-          void fetch("/api/razorpay/cancel-order", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              razorpayOrderId: response?.error?.metadata?.order_id ?? order_id,
-              checkoutAttemptId: attemptId,
-              reason: "payment_failed",
-            }),
-          }).finally(() => {
-            clearStoredFtwCheckoutAttemptId(attemptId);
-            checkoutAttemptIdRef.current = null;
-            setIsProcessingPayment(false);
-          });
-        } else {
-          setIsProcessingPayment(false);
-        }
-        pendingRzpOrderIdRef.current = null;
-        pendingSelectedAddressRef.current = null;
-        setIsCartOpen(true);
-        toast({ title: "Payment failed. Please try again.", variant: "destructive" });
-      });
       rzp.open();
     } catch {
-      stopFtwCheckoutHeartbeat();
       toast({ title: "Payment failed. Please try again.", variant: "destructive" });
       setIsProcessingPayment(false);
       setIsCartOpen(true);
@@ -1273,25 +1102,6 @@ export function CartDrawer() {
       document.body.appendChild(script);
     }
   }, [isCartOpen]);
-
-  useEffect(() => {
-    return () => stopFtwCheckoutHeartbeat();
-  }, []);
-
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      const razorpayOrderId = pendingRzpOrderIdRef.current;
-      const checkoutAttemptId = checkoutAttemptIdRef.current;
-      if (!razorpayOrderId || !checkoutAttemptId || paymentSucceededRef.current) return;
-      const body = new Blob(
-        [JSON.stringify({ razorpayOrderId, checkoutAttemptId, reason: "browser_closed" })],
-        { type: "application/json" },
-      );
-      navigator.sendBeacon("/api/razorpay/cancel-order", body);
-    };
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, []);
 
   // Mobile UPI return: when the user comes back from GPay/PhonePe/etc., the browser
   // fires visibilitychange. We poll our backend to check if payment completed, then
@@ -1342,7 +1152,6 @@ export function CartDrawer() {
         }
         orderClaimedRef.current = true;
         paymentSucceededRef.current = true;
-        stopFtwCheckoutHeartbeat();
         pendingRzpOrderIdRef.current = null;
 
         createOrder({ ...buildOrderPayload(selected, statusData.paymentId), razorpayOrderId: orderId }, {
@@ -1353,8 +1162,6 @@ export function CartDrawer() {
             setUseWallet(false);
             setIsProcessingPayment(false);
             paymentSucceededRef.current = false;
-            clearStoredFtwCheckoutAttemptId(checkoutAttemptIdRef.current);
-            checkoutAttemptIdRef.current = null;
             returningFromUpiRef.current = false;
           },
           onError: (err: any) => {

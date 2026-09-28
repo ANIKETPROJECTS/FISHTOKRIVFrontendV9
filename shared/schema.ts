@@ -121,8 +121,6 @@ export type OrderItem = {
   name: string;
   price: number | null;
   imageUrl?: string | null;
-  unit?: string | null;
-  isCombo?: boolean;
 };
 
 export type TimeslotActiveDay = {
@@ -328,7 +326,6 @@ export const insertOrderRequestSchema = z.object({
     price: z.number().nullable(),
     unit: z.string().nullable().optional(),
     imageUrl: z.string().nullable().optional(),
-    isCombo: z.boolean().optional(),
   })).min(1, "At least one item is required"),
   subtotal: z.number().nullable().optional(),
   discount: z.number().nullable().optional(),
