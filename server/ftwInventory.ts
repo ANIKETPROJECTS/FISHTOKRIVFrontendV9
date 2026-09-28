@@ -6,8 +6,9 @@ import { generateOrderId, getOrderModel, getPendingCheckoutModel } from "./order
 export const FTW_RESERVATION_TTL_MS = 30 * 60 * 1000;
 export const FTW_CHECKOUT_HEARTBEAT_STALE_MS = 6 * 1000;
 export const FTW_CHECKOUT_RECONCILE_INTERVAL_MS = 2 * 1000;
+export const FTW_CHECKOUT_CLOSE_RECHECK_MS = 1_500;
 const FTW_PENDING_PAYMENT_GRACE_MS = 2 * 60 * 1000;
-const FTW_PAYMENT_STATUS_RETRY_MS = 15 * 1000;
+export const FTW_PAYMENT_STATUS_RETRY_MS = 15 * 1000;
 const FTW_EMPTY_PAYMENT_STATUS_GRACE_MS = 15 * 1000;
 
 export type FtwBatchAllocation = {
@@ -1149,6 +1150,10 @@ export async function reconcileExpiredFtwReservations(
             createdAt: { $lte: heartbeatStaleBefore },
             ftwInventoryState: "reserved",
           },
+          {
+            ftwCheckoutTerminationRequestedAt: { $type: "date", $lte: now },
+            ftwInventoryState: "reserved",
+          },
           { ftwInventoryExpiresAt: { $lte: now } },
         ],
       },
@@ -1193,7 +1198,14 @@ export async function reconcileExpiredFtwReservations(
         : new Date(new Date(order.createdAt ?? now).getTime() + FTW_RESERVATION_TTL_MS);
       const latestOrder = await OrderModel.collection.findOne(
         { _id: order._id },
-        { projection: { paymentStatus: 1, ftwPaymentFinalizedAt: 1, ftwCheckoutHeartbeatAt: 1 } },
+        {
+          projection: {
+            paymentStatus: 1,
+            ftwPaymentFinalizedAt: 1,
+            ftwCheckoutHeartbeatAt: 1,
+            ftwCheckoutTerminationRequestedAt: 1,
+          },
+        },
       );
       if (latestOrder?.paymentStatus === "paid" || latestOrder?.ftwPaymentFinalizedAt) continue;
       const latestHeartbeatAt = latestOrder?.ftwCheckoutHeartbeatAt
@@ -1201,16 +1213,29 @@ export async function reconcileExpiredFtwReservations(
         : 0;
       const heartbeatIsFresh = latestHeartbeatAt > Date.now() - FTW_CHECKOUT_HEARTBEAT_STALE_MS;
       const heartbeatBaseTime = latestHeartbeatAt || new Date(order.createdAt ?? now).getTime();
-      const terminationRequestedAt = order.ftwCheckoutTerminationRequestedAt
-        ? new Date(order.ftwCheckoutTerminationRequestedAt).getTime()
+      const terminationRequestedAt = latestOrder?.ftwCheckoutTerminationRequestedAt
+        ? new Date(latestOrder.ftwCheckoutTerminationRequestedAt).getTime()
         : 0;
+      const heartbeatShowsLiveCheckout = heartbeatIsFresh &&
+        (!terminationRequestedAt || latestHeartbeatAt > terminationRequestedAt);
+      const emptyStatusGraceMs = terminationRequestedAt
+        ? FTW_CHECKOUT_CLOSE_RECHECK_MS
+        : FTW_EMPTY_PAYMENT_STATUS_GRACE_MS;
       const noPaymentStatusGraceActive =
         items.length === 0 &&
-        Date.now() < Math.max(
-          heartbeatBaseTime + FTW_CHECKOUT_HEARTBEAT_STALE_MS,
-          terminationRequestedAt,
-        ) + FTW_EMPTY_PAYMENT_STATUS_GRACE_MS &&
+        Date.now() < (terminationRequestedAt
+          ? terminationRequestedAt
+          : heartbeatBaseTime + FTW_CHECKOUT_HEARTBEAT_STALE_MS) + emptyStatusGraceMs &&
         Date.now() < expiresAt.getTime() + FTW_PENDING_PAYMENT_GRACE_MS;
+      if (noPaymentStatusGraceActive) {
+        const emptyStatusGraceEndsAt = (terminationRequestedAt
+          ? terminationRequestedAt
+          : heartbeatBaseTime + FTW_CHECKOUT_HEARTBEAT_STALE_MS) + emptyStatusGraceMs;
+        await OrderModel.collection.updateOne(
+          { _id: order._id, ftwCheckoutNextPaymentCheckAt: nextPaymentCheckAt },
+          { $set: { ftwCheckoutNextPaymentCheckAt: new Date(emptyStatusGraceEndsAt + 100) } },
+        );
+      }
 
       if (order.ftwInventoryState === "reserving") {
         const subHub = await resolveOrderSubHub(order);
@@ -1235,7 +1260,7 @@ export async function reconcileExpiredFtwReservations(
           order.inventoryDeducted = true;
         } else if (
           reservation ||
-          (heartbeatIsFresh && Date.now() < expiresAt.getTime()) ||
+          (heartbeatShowsLiveCheckout && Date.now() < expiresAt.getTime()) ||
           noPaymentStatusGraceActive ||
           (hasUnresolvedPayment && now.getTime() < expiresAt.getTime() + FTW_PENDING_PAYMENT_GRACE_MS)
         ) {
@@ -1266,7 +1291,7 @@ export async function reconcileExpiredFtwReservations(
         }
       }
 
-      if (heartbeatIsFresh && Date.now() < expiresAt.getTime()) continue;
+      if (heartbeatShowsLiveCheckout && Date.now() < expiresAt.getTime()) continue;
       if (noPaymentStatusGraceActive) continue;
       if (hasUnresolvedPayment && now.getTime() < expiresAt.getTime() + FTW_PENDING_PAYMENT_GRACE_MS) {
         continue;

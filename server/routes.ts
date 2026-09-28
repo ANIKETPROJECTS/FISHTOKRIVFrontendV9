@@ -24,7 +24,9 @@ import {
 import {
   createOrGetFtwCheckoutDraft,
   deleteUnpaidFtwCheckout,
+  FTW_CHECKOUT_CLOSE_RECHECK_MS,
   FTW_CHECKOUT_RECONCILE_INTERVAL_MS,
+  FTW_PAYMENT_STATUS_RETRY_MS,
   FtwInventoryError,
   isFtwOrderId,
   reconcileExpiredFtwReservations,
@@ -1066,25 +1068,31 @@ export async function registerRoutes(
   if (!razorpay) {
     console.warn("[Razorpay] RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set — payment routes disabled");
   }
-  if (razorpay && !ftwReservationReconcileTimer) {
-    ftwReservationReconcileTimer = setInterval(() => {
-      void reconcileExpiredFtwReservations(async (razorpayOrderId) => {
-        const payments = await (razorpay as any).orders.fetchPayments(razorpayOrderId);
-        const successful = (payments.items ?? []).find((payment: any) =>
-          isSuccessfulRazorpayStatus(payment.status)
-        );
-        if (successful) {
-          await finalizeFtwRazorpayPayment({
-            razorpayOrderId,
-            razorpayPaymentId: String(successful.id),
-            amount: Number(successful.amount ?? 0) / 100,
-          });
-        }
-        return payments;
-      }).catch((error) => {
-        console.error("[FTW inventory] Reservation reconciliation job failed:", error);
+  const fetchAndFinalizeFtwPayments = async (razorpayOrderId: string) => {
+    const payments = await (razorpay as any).orders.fetchPayments(razorpayOrderId);
+    const successful = (payments.items ?? []).find((payment: any) =>
+      isSuccessfulRazorpayStatus(payment.status)
+    );
+    if (successful) {
+      await finalizeFtwRazorpayPayment({
+        razorpayOrderId,
+        razorpayPaymentId: String(successful.id),
+        amount: Number(successful.amount ?? 0) / 100,
       });
-    }, FTW_CHECKOUT_RECONCILE_INTERVAL_MS);
+    }
+    return payments;
+  };
+  const runFtwReservationReconciliation = () => {
+    if (!razorpay) return;
+    void reconcileExpiredFtwReservations(fetchAndFinalizeFtwPayments).catch((error) => {
+      console.error("[FTW inventory] Reservation reconciliation job failed:", error);
+    });
+  };
+  if (razorpay && !ftwReservationReconcileTimer) {
+    ftwReservationReconcileTimer = setInterval(
+      runFtwReservationReconciliation,
+      FTW_CHECKOUT_RECONCILE_INTERVAL_MS,
+    );
     ftwReservationReconcileTimer.unref?.();
   }
 
@@ -1836,21 +1844,42 @@ export async function registerRoutes(
         return res.json({ paid: true, restored: false });
       }
 
-      // End this browser attempt and let the heartbeat reconciler wait for other
-      // tabs, then verify that Razorpay has no successful or still-pending attempt.
+      // Mark this attempt ended. A fresh heartbeat written after this signal
+      // still protects another active tab; otherwise an empty result is rechecked quickly.
       const requestedAt = new Date();
+      const hasUnresolvedPayment = (payments.items ?? []).some((payment: any) =>
+        !["failed", "refunded"].includes(String(payment?.status ?? "").toLowerCase())
+      );
       const terminationUpdate: Record<string, any> = {
         ftwCheckoutTerminationRequestedAt: requestedAt,
         ftwCheckoutTerminationReason: reason,
       };
       if (reason === "browser_closed") terminationUpdate.ftwBrowserClosedAt = requestedAt;
+      if ((payments.items ?? []).length === 0) {
+        terminationUpdate.ftwCheckoutNextPaymentCheckAt =
+          new Date(requestedAt.getTime() + FTW_CHECKOUT_CLOSE_RECHECK_MS);
+      } else if (hasUnresolvedPayment) {
+        terminationUpdate.ftwCheckoutNextPaymentCheckAt =
+          new Date(requestedAt.getTime() + FTW_PAYMENT_STATUS_RETRY_MS);
+      }
       await OrderModel.collection.updateOne(
         { _id: order._id, ftwInventoryState: { $in: ["reserving", "reserved"] } },
         {
           $set: terminationUpdate,
-          $unset: { ftwCheckoutNextPaymentCheckAt: "" },
+          ...((payments.items ?? []).length > 0 && !hasUnresolvedPayment
+            ? { $unset: { ftwCheckoutNextPaymentCheckAt: "" } }
+            : {}),
         },
       );
+      if ((payments.items ?? []).length === 0) {
+        const recheckTimer = setTimeout(
+          runFtwReservationReconciliation,
+          FTW_CHECKOUT_CLOSE_RECHECK_MS + 50,
+        );
+        recheckTimer.unref?.();
+      } else if (!hasUnresolvedPayment) {
+        setImmediate(runFtwReservationReconciliation);
+      }
       return res.json({
         restored: false,
         restoreScheduled: true,
