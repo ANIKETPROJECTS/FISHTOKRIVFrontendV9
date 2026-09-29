@@ -183,6 +183,13 @@ type StockCheckResult = {
   inStock: boolean;
   unavailableItems: Array<{ productId: string; name: string; requested: number; available: number }>;
 };
+type CartStockIssueRow = {
+  cartItemId: number;
+  name: string;
+  quantity: number;
+  warning: string;
+  details: string;
+};
 
 async function checkCheckoutStock(
   items: StockCheckItem[],
@@ -215,12 +222,12 @@ function getStockCheckItems(items: CartItem[]): StockCheckItem[] {
   }));
 }
 
-function getCartStockWarnings(
+function getCartStockIssueRows(
   items: CartItem[],
   result: StockCheckResult,
   paymentMayStillComplete = false,
-): Record<number, string> {
-  const warnings: Record<number, string> = {};
+): CartStockIssueRow[] {
+  const rows: CartStockIssueRow[] = [];
 
   for (const item of items) {
     const itemProductId = item.originalId ?? String(item.id);
@@ -238,12 +245,31 @@ function getCartStockWarnings(
       : item.isCombo
         ? "Not enough stock for this combo"
         : `Only ${relatedIssues[0].available} available; reduce the quantity`;
-    warnings[item.id] = paymentMayStillComplete && completelyOutOfStock
+    rows.push({
+      cartItemId: item.id,
+      name: item.name,
+      quantity: item.quantity,
+      warning: paymentMayStillComplete && completelyOutOfStock
       ? `${warning}. An approved UPI request may still complete.`
-      : warning;
+        : warning,
+      details: relatedIssues
+        .map((issue) => `${issue.name}: ${issue.available} available, ${issue.requested} requested`)
+        .join("; "),
+    });
   }
 
-  return warnings;
+  return rows;
+}
+
+function getCartStockWarnings(
+  items: CartItem[],
+  result: StockCheckResult,
+  paymentMayStillComplete = false,
+): Record<number, string> {
+  return Object.fromEntries(
+    getCartStockIssueRows(items, result, paymentMayStillComplete)
+      .map((row) => [row.cartItemId, row.warning]),
+  );
 }
 
 function areStockWarningsEqual(
@@ -257,7 +283,7 @@ function areStockWarningsEqual(
 }
 
 export function CartDrawer() {
-  const { isCartOpen, setIsCartOpen, items, updateQuantity, updateInstruction, totalPrice, clearCart, appliedCoupon, setAppliedCoupon, discountAmount, computeMaxQty } = useCart();
+  const { isCartOpen, setIsCartOpen, items, updateQuantity, updateInstruction, removeFromCart, totalPrice, clearCart, appliedCoupon, setAppliedCoupon, discountAmount, computeMaxQty } = useCart();
   const { mutate: createOrder, isPending } = useCreateOrder();
   const { customer } = useCustomer();
   const { selectedSubHub, isHubReady } = useHub();
@@ -270,6 +296,8 @@ export function CartDrawer() {
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
   const [isRazorpayOpen, setIsRazorpayOpen] = useState(false);
   const [cartStockWarnings, setCartStockWarnings] = useState<Record<number, string>>({});
+  const [isStockIssueDialogOpen, setIsStockIssueDialogOpen] = useState(false);
+  const [stockIssueRows, setStockIssueRows] = useState<CartStockIssueRow[]>([]);
   const paymentSucceededRef = useRef(false);
   // Guards against a duplicate order: Razorpay's own `handler` callback and the
   // `visibilitychange` UPI-resume poll can BOTH detect the same successful payment
@@ -289,6 +317,28 @@ export function CartDrawer() {
   const stockCheckInFlightRef = useRef(false);
   const cartStockCheckInFlightRef = useRef(false);
   const returningFromUpiRef = useRef(false);
+  const openStockIssueDialog = (
+    result: StockCheckResult,
+    paymentMayStillComplete = false,
+  ) => {
+    const rows = getCartStockIssueRows(items, result, paymentMayStillComplete);
+    setCartStockWarnings(
+      Object.fromEntries(rows.map((row) => [row.cartItemId, row.warning])),
+    );
+    setStockIssueRows(rows);
+    setIsStockIssueDialogOpen(true);
+  };
+  const removeStockIssueItems = () => {
+    const itemIds = new Set(stockIssueRows.map((row) => row.cartItemId));
+    itemIds.forEach(removeFromCart);
+    setCartStockWarnings((current) => {
+      const next = { ...current };
+      itemIds.forEach((id) => delete next[id]);
+      return next;
+    });
+    setStockIssueRows([]);
+    setIsStockIssueDialogOpen(false);
+  };
   const [paymentMethod, setPaymentMethod] = useState<"cod" | "online">("online");
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const [showUnserviceablePopup, setShowUnserviceablePopup] = useState(false);
