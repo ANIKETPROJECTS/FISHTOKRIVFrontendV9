@@ -25,7 +25,7 @@ import iconScheduleImg from "@assets/schedule_1777284518383.png";
 import notesIconImg from "@/assets/notes.png";
 import giftCardIconImg from "@/assets/gift-card.png";
 import tagIconImg from "@/assets/tag.png";
-import { useCart } from "@/context/CartContext";
+import { useCart, type CartItem } from "@/context/CartContext";
 import { useCreateOrder } from "@/hooks/use-orders";
 import { useProducts } from "@/hooks/use-products";
 import { useCustomer } from "@/context/CustomerContext";
@@ -207,13 +207,53 @@ async function checkCheckoutStock(
   return data as StockCheckResult;
 }
 
-function getStockIssueMessage(result: StockCheckResult): string {
-  if (result.unavailableItems.length === 0) {
-    return "One or more items are no longer available in the requested quantity.";
+function getStockCheckItems(items: CartItem[]): StockCheckItem[] {
+  return items.map((item) => ({
+    productId: item.originalId ?? String(item.id),
+    quantity: item.quantity,
+    name: item.name,
+  }));
+}
+
+function getCartStockWarnings(
+  items: CartItem[],
+  result: StockCheckResult,
+  paymentMayStillComplete = false,
+): Record<number, string> {
+  const warnings: Record<number, string> = {};
+
+  for (const item of items) {
+    const itemProductId = item.originalId ?? String(item.id);
+    const relatedIssues = result.unavailableItems.filter((issue) =>
+      issue.productId === itemProductId ||
+      (item.isCombo && item.comboIncludes?.some(
+        (include) => String(include.productId) === issue.productId,
+      )),
+    );
+
+    if (relatedIssues.length === 0) continue;
+    const completelyOutOfStock = relatedIssues.some((issue) => issue.available <= 0);
+    const warning = completelyOutOfStock
+      ? "Item went out of stock"
+      : item.isCombo
+        ? "Not enough stock for this combo"
+        : `Only ${relatedIssues[0].available} available; reduce the quantity`;
+    warnings[item.id] = paymentMayStillComplete && completelyOutOfStock
+      ? `${warning}. An approved UPI request may still complete.`
+      : warning;
   }
-  return result.unavailableItems
-    .map((item) => `${item.name}: ${item.available} available, ${item.requested} requested`)
-    .join("; ");
+
+  return warnings;
+}
+
+function areStockWarningsEqual(
+  current: Record<number, string>,
+  next: Record<number, string>,
+): boolean {
+  const currentKeys = Object.keys(current);
+  const nextKeys = Object.keys(next);
+  return currentKeys.length === nextKeys.length &&
+    currentKeys.every((key) => current[Number(key)] === next[Number(key)]);
 }
 
 export function CartDrawer() {
@@ -229,6 +269,7 @@ export function CartDrawer() {
   const [isSuccess, setIsSuccess] = useState(false);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
   const [isRazorpayOpen, setIsRazorpayOpen] = useState(false);
+  const [cartStockWarnings, setCartStockWarnings] = useState<Record<number, string>>({});
   const paymentSucceededRef = useRef(false);
   // Guards against a duplicate order: Razorpay's own `handler` callback and the
   // `visibilitychange` UPI-resume poll can BOTH detect the same successful payment
@@ -246,6 +287,7 @@ export function CartDrawer() {
   const razorpayInstanceRef = useRef<any>(null);
   const stockInvalidatedRef = useRef(false);
   const stockCheckInFlightRef = useRef(false);
+  const cartStockCheckInFlightRef = useRef(false);
   const returningFromUpiRef = useRef(false);
   const [paymentMethod, setPaymentMethod] = useState<"cod" | "online">("online");
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
@@ -1005,24 +1047,16 @@ export function CartDrawer() {
     // UPI flow: go through Razorpay
     setIsProcessingPayment(true);
     stockInvalidatedRef.current = false;
-    const stockCheckItems: StockCheckItem[] = items.map((item) => ({
-      productId: item.originalId ?? String(item.id),
-      quantity: item.quantity,
-      name: item.name,
-    }));
+    const stockCheckItems = getStockCheckItems(items);
     pendingStockItemsRef.current = stockCheckItems;
     try {
       // Run a fresh server-side stock check as the first checkout request after
       // the customer taps Pay via UPI; cached storefront quantities are not enough.
       const stockResult = await checkCheckoutStock(stockCheckItems, selectedSubHub?.dbName);
       if (!stockResult.inStock) {
+        setCartStockWarnings(getCartStockWarnings(items, stockResult));
         setIsProcessingPayment(false);
         queryClient.invalidateQueries({ queryKey: ["/api/products"] });
-        toast({
-          title: "Items went out of stock",
-          description: getStockIssueMessage(stockResult),
-          variant: "destructive",
-        });
         return;
       }
     } catch (stockError: any) {
@@ -1064,15 +1098,17 @@ export function CartDrawer() {
         const errorData = await res.json().catch(() => null);
         const stockUnavailable = errorData?.code === "STOCK_UNAVAILABLE";
         if (stockUnavailable) {
+          setCartStockWarnings(getCartStockWarnings(items, {
+            inStock: false,
+            unavailableItems: errorData?.unavailableItems ?? [],
+          }));
           queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+        } else {
+          toast({
+            title: errorData?.message || "Could not initiate payment. Please try again.",
+            variant: "destructive",
+          });
         }
-        toast({
-          title: stockUnavailable
-            ? "Items went out of stock"
-            : errorData?.message || "Could not initiate payment. Please try again.",
-          description: stockUnavailable ? errorData?.message : undefined,
-          variant: "destructive",
-        });
         setIsProcessingPayment(false);
         setIsCartOpen(true);
         return;
@@ -1095,12 +1131,8 @@ export function CartDrawer() {
         return;
       }
       if (!latestStock.inStock) {
+        setCartStockWarnings(getCartStockWarnings(items, latestStock));
         queryClient.invalidateQueries({ queryKey: ["/api/products"] });
-        toast({
-          title: "Items went out of stock",
-          description: getStockIssueMessage(latestStock),
-          variant: "destructive",
-        });
         setIsProcessingPayment(false);
         setIsCartOpen(true);
         return;
@@ -1233,6 +1265,59 @@ export function CartDrawer() {
     }
   }, [isCartOpen]);
 
+  // Keep availability current for every item in the cart, even when the drawer
+  // is closed. Razorpay has its own polling effect below while payment is open.
+  useEffect(() => {
+    if (items.length === 0) {
+      setCartStockWarnings((current) =>
+        Object.keys(current).length === 0 ? current : {},
+      );
+      return;
+    }
+    if (!isHubReady || !selectedSubHub?.dbName) {
+      setCartStockWarnings((current) =>
+        Object.keys(current).length === 0 ? current : {},
+      );
+      return;
+    }
+    if (isRazorpayOpen) return;
+
+    let stopped = false;
+    const hubDbName = selectedSubHub.dbName;
+
+    const pollCartStock = async () => {
+      if (stopped || cartStockCheckInFlightRef.current) return;
+      cartStockCheckInFlightRef.current = true;
+      try {
+        const result = await checkCheckoutStock(getStockCheckItems(items), hubDbName);
+        if (stopped) return;
+
+        const nextWarnings = getCartStockWarnings(items, result);
+        setCartStockWarnings((current) =>
+          areStockWarningsEqual(current, nextWarnings) ? current : nextWarnings,
+        );
+      } catch (error) {
+        if (!stopped) {
+          console.warn("[cart] Could not refresh cart stock:", error);
+        }
+      } finally {
+        cartStockCheckInFlightRef.current = false;
+      }
+    };
+
+    const timer = window.setInterval(pollCartStock, 5_000);
+    document.addEventListener("visibilitychange", pollCartStock);
+    window.addEventListener("focus", pollCartStock);
+    void pollCartStock();
+
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", pollCartStock);
+      window.removeEventListener("focus", pollCartStock);
+    };
+  }, [items, isHubReady, selectedSubHub?.dbName, isRazorpayOpen]);
+
   // Keep checking the database while Razorpay is open, including when the
   // customer returns from an external UPI app. Close the checkout if stock no
   // longer covers every line in the pending order.
@@ -1277,6 +1362,7 @@ export function CartDrawer() {
         }
 
         if (stopped) return;
+        setCartStockWarnings(getCartStockWarnings(items, result, true));
         stockInvalidatedRef.current = true;
         pendingRzpOrderIdRef.current = null;
         pendingSelectedAddressRef.current = null;
@@ -1286,11 +1372,6 @@ export function CartDrawer() {
         setIsProcessingPayment(false);
         setIsCartOpen(true);
         queryClient.invalidateQueries({ queryKey: ["/api/products"] });
-        toast({
-          title: "Items went out of stock",
-          description: `${getStockIssueMessage(result)} The payment window has been closed. Please review your cart. If you already approved a UPI request, it may still complete.`,
-          variant: "destructive",
-        });
         razorpayInstanceRef.current?.close();
         razorpayInstanceRef.current = null;
       } catch (err) {
@@ -1312,7 +1393,7 @@ export function CartDrawer() {
       document.removeEventListener("visibilitychange", pollStock);
       window.removeEventListener("focus", pollStock);
     };
-  }, [isRazorpayOpen, selectedSubHub?.dbName, queryClient, setIsCartOpen, toast]);
+  }, [isRazorpayOpen, selectedSubHub?.dbName, queryClient, setIsCartOpen, items]);
 
   // Mobile UPI return: when the user comes back from GPay/PhonePe/etc., the browser
   // fires visibilitychange. We poll our backend to check if payment completed, then
@@ -1540,6 +1621,15 @@ export function CartDrawer() {
                             <div className="flex-1 min-w-0">
                               <h4 className="font-semibold text-foreground text-sm truncate">{item.name}</h4>
                               <p className="text-xs text-muted-foreground">{item.unit}</p>
+                              {cartStockWarnings[item.id] && (
+                                <p
+                                  className="mt-1 text-[11px] font-semibold text-destructive"
+                                  role="status"
+                                  data-testid={`stock-warning-${item.id}`}
+                                >
+                                  {cartStockWarnings[item.id]}
+                                </p>
+                              )}
                                {item.isPreorderCheckout && (
                                  <p className="text-[11px] leading-snug text-[#364F9F] mt-1" data-testid={`availability-${item.id}`}>
                                    {formatPreorderAvailability(item)}
