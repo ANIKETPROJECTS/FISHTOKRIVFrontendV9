@@ -14,6 +14,10 @@ import { SuperHubModel, SubHubModel, OtpModel } from "./adminDb";
 import { getHubModels } from "./hubConnections";
 import { CustomerDbModel } from "./customerDb";
 import { computeExpiryDate, computeRemainingTime } from "./inventorySync";
+import {
+  findCheckoutStockIssues,
+  type CheckoutStockLine,
+} from "./checkoutStock";
 import Razorpay from "razorpay";
 import { createHmac } from "crypto";
 import {
@@ -339,6 +343,93 @@ export async function registerRoutes(
     return null;
   };
 
+  const getCheckoutHubModels = async (dbName: unknown) => {
+    if (typeof dbName !== "string" || !dbName.trim()) return null;
+    const configuredHub = await SubHubModel.exists({ dbName });
+    if (!configuredHub) return null;
+    return getHubModels(dbName);
+  };
+
+  const validateCheckoutStock = async (hub: any, rawItems: unknown) => {
+    if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > 100) {
+      throw new Error("Invalid checkout items");
+    }
+
+    const normalizedItems = (rawItems as any[]).map((rawItem) => {
+      const quantity = Number(rawItem?.quantity);
+      const productId = String(rawItem?.productId ?? "").trim();
+      if (!productId || !Number.isInteger(quantity) || quantity <= 0) {
+        throw new Error("Invalid checkout item");
+      }
+      return { productId, quantity, name: rawItem?.name };
+    });
+    const sourceIds = [...new Set(normalizedItems
+      .map((item) => item.productId)
+      .filter((id) => /^[a-f\d]{24}$/i.test(id)))];
+    const [sourceProducts, sourceCombos] = sourceIds.length
+      ? await Promise.all([
+          hub.Product.find({ _id: { $in: sourceIds } }).lean() as Promise<any[]>,
+          hub.Combo.find({ _id: { $in: sourceIds } }).lean() as Promise<any[]>,
+        ])
+      : [[], []];
+    const sourceProductsById = new Map(sourceProducts.map((product: any) => [String(product._id), product]));
+    const sourceCombosById = new Map(sourceCombos.map((combo: any) => [String(combo._id), combo]));
+
+    const aggregated = new Map<string, CheckoutStockLine>();
+    const missingNames = new Map<string, string>();
+    const addLine = (productId: unknown, quantity: number, name?: string) => {
+      const id = String(productId ?? "").trim();
+      if (!id || !Number.isFinite(quantity) || quantity <= 0) {
+        throw new Error("Invalid checkout item");
+      }
+      const existing = aggregated.get(id);
+      aggregated.set(id, {
+        productId: id,
+        quantity: (existing?.quantity ?? 0) + quantity,
+        name: existing?.name ?? name,
+      });
+      if (name && !missingNames.has(id)) missingNames.set(id, name);
+    };
+
+    for (const rawItem of normalizedItems) {
+      const { productId, quantity } = rawItem;
+      const product = sourceProductsById.get(productId);
+      if (product) {
+        addLine(productId, quantity, product.name ?? rawItem.name);
+        continue;
+      }
+
+      const combo = sourceCombosById.get(productId);
+      if (!combo || combo.isActive === false || !Array.isArray(combo.includes) || combo.includes.length === 0) {
+        addLine(productId, quantity, combo?.name ?? rawItem.name);
+        continue;
+      }
+
+      for (const include of combo.includes) {
+        const componentQuantity = Number(include.quantity ?? 1);
+        const requiredQuantity = quantity * componentQuantity;
+        if (!Number.isInteger(componentQuantity) || componentQuantity <= 0) {
+          throw new Error("Invalid combo inventory configuration");
+        }
+        addLine(include.productId, requiredQuantity, include.label ?? combo.name);
+      }
+    }
+
+    const productIds = [...aggregated.keys()].filter((id) => /^[a-f\d]{24}$/i.test(id));
+    const missingProductIds = productIds.filter((id) => !sourceProductsById.has(id));
+    const additionalProducts = missingProductIds.length
+      ? await hub.Product.find({ _id: { $in: missingProductIds } }).lean() as any[]
+      : [];
+    const productsById = new Map(sourceProductsById);
+    for (const product of additionalProducts) {
+      productsById.set(String(product._id), product);
+    }
+    const lines = [...aggregated.values()];
+    const unavailableItems = findCheckoutStockIssues(lines, productsById, missingNames);
+
+    return { inStock: unavailableItems.length === 0, unavailableItems };
+  };
+
   // ── Inline mappers ──────────────────────────────────────────────────────
   const toProduct = (doc: any) => {
     const now = new Date();
@@ -618,6 +709,24 @@ export async function registerRoutes(
     console.warn("[Razorpay] RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set — payment routes disabled");
   }
 
+  app.post("/api/checkout/stock-check", async (req, res) => {
+    try {
+      const dbName = req.headers["x-hub-db"];
+      const hub = await getCheckoutHubModels(dbName);
+      if (!hub) {
+        return res.status(400).json({ message: "Please select a valid delivery hub." });
+      }
+      const result = await validateCheckoutStock(hub, req.body?.items);
+      return res.json(result);
+    } catch (err: any) {
+      if (err?.message?.startsWith("Invalid ")) {
+        return res.status(400).json({ message: err.message });
+      }
+      console.error("[checkout] Stock check failed:", err);
+      return res.status(503).json({ message: "Could not verify item availability. Please try again." });
+    }
+  });
+
   const fetchVerifiedRazorpayPayment = async (
     razorpayOrderId: string,
     razorpayPaymentId: string,
@@ -647,6 +756,30 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Invalid amount" });
       }
       if (orderPayload && typeof orderPayload === "object") {
+        const hub = await getCheckoutHubModels(orderPayload.hubDbName);
+        if (!hub) {
+          return res.status(400).json({ message: "Please select a valid delivery hub." });
+        }
+        let stockResult;
+        try {
+          stockResult = await validateCheckoutStock(hub, orderPayload.items);
+        } catch (stockValidationErr: any) {
+          if (stockValidationErr?.message?.startsWith("Invalid ")) {
+            return res.status(400).json({ message: stockValidationErr.message });
+          }
+          throw stockValidationErr;
+        }
+        if (!stockResult.inStock) {
+          const names = stockResult.unavailableItems.map((item: any) => item.name).join(", ");
+          return res.status(409).json({
+            code: "STOCK_UNAVAILABLE",
+            message: names
+              ? `${names} ${stockResult.unavailableItems.length === 1 ? "is" : "are"} no longer available in the requested quantity.`
+              : "One or more items are no longer available in the requested quantity.",
+            unavailableItems: stockResult.unavailableItems,
+          });
+        }
+
         try {
           const slotError = await validateTimeslotBeforeCheckout({
             hubDbName: orderPayload.hubDbName,

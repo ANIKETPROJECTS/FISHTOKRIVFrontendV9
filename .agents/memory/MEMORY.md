@@ -11,3 +11,4 @@
 - [Same-day slot cutoff](same-day-slot-cutoff.md) — enforce the 30-minute cutoff server-side in India time; stale carts can submit after the UI hides a slot.
 - [Cross-channel inventory mismatch](inventory-channel-mismatch.md) — FTS and FTW must share one atomic stock field; external batches and storefront inventoryBatches are not interchangeable.
 - [Production logging and polling](production-logging-and-polling.md) — production API logs stay concise; live catalog refresh is explicit rather than global.
+- [Keep checkout helpers isolated](checkout-helper-imports.md) — stock calculations used by tests should not import DB-connected sync modules.

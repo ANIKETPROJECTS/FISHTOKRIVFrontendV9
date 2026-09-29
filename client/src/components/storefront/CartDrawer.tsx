@@ -178,6 +178,44 @@ function isPreorderTimeslotAllowedForItems(
   });
 }
 
+type StockCheckItem = { productId: string; quantity: number; name: string };
+type StockCheckResult = {
+  inStock: boolean;
+  unavailableItems: Array<{ productId: string; name: string; requested: number; available: number }>;
+};
+
+async function checkCheckoutStock(
+  items: StockCheckItem[],
+  hubDbName?: string | null,
+): Promise<StockCheckResult> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...getHubHeaders(),
+  };
+  if (hubDbName) headers["X-Hub-DB"] = hubDbName;
+
+  const response = await fetch("/api/checkout/stock-check", {
+    method: "POST",
+    headers,
+    credentials: "include",
+    body: JSON.stringify({ items }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.message || "Could not verify item availability. Please try again.");
+  }
+  return data as StockCheckResult;
+}
+
+function getStockIssueMessage(result: StockCheckResult): string {
+  if (result.unavailableItems.length === 0) {
+    return "One or more items are no longer available in the requested quantity.";
+  }
+  return result.unavailableItems
+    .map((item) => `${item.name}: ${item.available} available, ${item.requested} requested`)
+    .join("; ");
+}
+
 export function CartDrawer() {
   const { isCartOpen, setIsCartOpen, items, updateQuantity, updateInstruction, totalPrice, clearCart, appliedCoupon, setAppliedCoupon, discountAmount, computeMaxQty } = useCart();
   const { mutate: createOrder, isPending } = useCreateOrder();
@@ -190,6 +228,7 @@ export function CartDrawer() {
 
   const [isSuccess, setIsSuccess] = useState(false);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
+  const [isRazorpayOpen, setIsRazorpayOpen] = useState(false);
   const paymentSucceededRef = useRef(false);
   // Guards against a duplicate order: Razorpay's own `handler` callback and the
   // `visibilitychange` UPI-resume poll can BOTH detect the same successful payment
@@ -203,6 +242,10 @@ export function CartDrawer() {
   // Mobile UPI return refs — store pending Razorpay order so we can poll when user comes back from GPay
   const pendingRzpOrderIdRef = useRef<string | null>(null);
   const pendingSelectedAddressRef = useRef<any>(null);
+  const pendingStockItemsRef = useRef<Array<{ productId: string; quantity: number; name: string }>>([]);
+  const razorpayInstanceRef = useRef<any>(null);
+  const stockInvalidatedRef = useRef(false);
+  const stockCheckInFlightRef = useRef(false);
   const returningFromUpiRef = useRef(false);
   const [paymentMethod, setPaymentMethod] = useState<"cod" | "online">("online");
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
@@ -961,6 +1004,37 @@ export function CartDrawer() {
 
     // UPI flow: go through Razorpay
     setIsProcessingPayment(true);
+    stockInvalidatedRef.current = false;
+    const stockCheckItems: StockCheckItem[] = items.map((item) => ({
+      productId: item.originalId ?? String(item.id),
+      quantity: item.quantity,
+      name: item.name,
+    }));
+    pendingStockItemsRef.current = stockCheckItems;
+    try {
+      // Run a fresh server-side stock check as the first checkout request after
+      // the customer taps Pay via UPI; cached storefront quantities are not enough.
+      const stockResult = await checkCheckoutStock(stockCheckItems, selectedSubHub?.dbName);
+      if (!stockResult.inStock) {
+        setIsProcessingPayment(false);
+        queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+        toast({
+          title: "Items went out of stock",
+          description: getStockIssueMessage(stockResult),
+          variant: "destructive",
+        });
+        return;
+      }
+    } catch (stockError: any) {
+      setIsProcessingPayment(false);
+      toast({
+        title: "Could not check current stock",
+        description: stockError?.message || "Please try again before paying.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     // Close the drawer BEFORE opening Razorpay so its Sheet backdrop doesn't sit on top
     // and intercept touch events on the Razorpay bottom sheet (mobile bug).
     // We will force it back open when payment succeeds to show the success screen.
@@ -988,8 +1062,15 @@ export function CartDrawer() {
       });
       if (!res.ok) {
         const errorData = await res.json().catch(() => null);
+        const stockUnavailable = errorData?.code === "STOCK_UNAVAILABLE";
+        if (stockUnavailable) {
+          queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+        }
         toast({
-          title: errorData?.message || "Could not initiate payment. Please try again.",
+          title: stockUnavailable
+            ? "Items went out of stock"
+            : errorData?.message || "Could not initiate payment. Please try again.",
+          description: stockUnavailable ? errorData?.message : undefined,
           variant: "destructive",
         });
         setIsProcessingPayment(false);
@@ -997,6 +1078,33 @@ export function CartDrawer() {
         return;
       }
       const { order_id, amount: rzpAmount, currency } = await res.json();
+
+      // Recheck after the Razorpay order is prepared and immediately before
+      // opening its payment UI, closing the small race after the initial tap check.
+      let latestStock: StockCheckResult;
+      try {
+        latestStock = await checkCheckoutStock(stockCheckItems, selectedSubHub?.dbName);
+      } catch (stockError: any) {
+        toast({
+          title: "Could not check current stock",
+          description: stockError?.message || "Please try again before paying.",
+          variant: "destructive",
+        });
+        setIsProcessingPayment(false);
+        setIsCartOpen(true);
+        return;
+      }
+      if (!latestStock.inStock) {
+        queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+        toast({
+          title: "Items went out of stock",
+          description: getStockIssueMessage(latestStock),
+          variant: "destructive",
+        });
+        setIsProcessingPayment(false);
+        setIsCartOpen(true);
+        return;
+      }
 
       const options = {
         key: import.meta.env.VITE_RAZORPAY_KEY_ID,
@@ -1019,10 +1127,13 @@ export function CartDrawer() {
             return;
           }
           orderClaimedRef.current = true;
+          setIsRazorpayOpen(false);
+          razorpayInstanceRef.current = null;
           // Mark as succeeded and clear pending UPI refs so the visibilitychange listener doesn't double-process
           paymentSucceededRef.current = true;
           pendingRzpOrderIdRef.current = null;
           pendingSelectedAddressRef.current = null;
+          pendingStockItemsRef.current = [];
           try {
             const verifyRes = await fetch("/api/razorpay/verify-payment", {
               method: "POST",
@@ -1042,6 +1153,8 @@ export function CartDrawer() {
             }
             createOrder({ ...buildOrderPayload(selected, response.razorpay_payment_id), razorpayOrderId: order_id }, {
               onSuccess: () => {
+                setIsRazorpayOpen(false);
+                razorpayInstanceRef.current = null;
                 // Force the drawer open so the success screen is visible
                 setIsCartOpen(true);
                 setIsSuccess(true);
@@ -1052,6 +1165,8 @@ export function CartDrawer() {
               },
               onError: (err: any) => {
                 paymentSucceededRef.current = false;
+                setIsRazorpayOpen(false);
+                razorpayInstanceRef.current = null;
                 setIsProcessingPayment(false);
                 setIsCartOpen(true);
                 toast({ title: err?.message || "Could not place order. Please try again.", variant: "destructive" });
@@ -1065,11 +1180,18 @@ export function CartDrawer() {
         },
         modal: {
           ondismiss: () => {
+            setIsRazorpayOpen(false);
+            razorpayInstanceRef.current = null;
+            if (stockInvalidatedRef.current) {
+              stockInvalidatedRef.current = false;
+              return;
+            }
             // Suppress if payment already succeeded OR if we're actively polling after returning from a UPI app
             if (paymentSucceededRef.current || returningFromUpiRef.current) return;
             // User closed the modal — treat as cancellation and reset state
             pendingRzpOrderIdRef.current = null;
             pendingSelectedAddressRef.current = null;
+            pendingStockItemsRef.current = [];
             setIsProcessingPayment(false);
             setIsCartOpen(true);
             toast({ title: "Payment cancelled", variant: "destructive" });
@@ -1083,11 +1205,19 @@ export function CartDrawer() {
       pendingRzpOrderIdRef.current = order_id;
       pendingSelectedAddressRef.current = selected;
       orderClaimedRef.current = false;
+      stockInvalidatedRef.current = false;
 
       const rzp = new (window as any).Razorpay(options);
+      razorpayInstanceRef.current = rzp;
       rzp.open();
+      setIsRazorpayOpen(true);
     } catch {
       toast({ title: "Payment failed. Please try again.", variant: "destructive" });
+      setIsRazorpayOpen(false);
+      razorpayInstanceRef.current = null;
+      pendingRzpOrderIdRef.current = null;
+      pendingSelectedAddressRef.current = null;
+      pendingStockItemsRef.current = [];
       setIsProcessingPayment(false);
       setIsCartOpen(true);
     }
@@ -1102,6 +1232,87 @@ export function CartDrawer() {
       document.body.appendChild(script);
     }
   }, [isCartOpen]);
+
+  // Keep checking the database while Razorpay is open, including when the
+  // customer returns from an external UPI app. Close the checkout if stock no
+  // longer covers every line in the pending order.
+  useEffect(() => {
+    if (!isRazorpayOpen) return;
+    let stopped = false;
+
+    const pollStock = async () => {
+      if (
+        stopped ||
+        stockCheckInFlightRef.current ||
+        paymentSucceededRef.current ||
+        orderClaimedRef.current ||
+        pendingStockItemsRef.current.length === 0
+      ) return;
+
+      stockCheckInFlightRef.current = true;
+      try {
+        const result = await checkCheckoutStock(
+          pendingStockItemsRef.current,
+          selectedSubHub?.dbName,
+        );
+        if (stopped || result.inStock) return;
+
+        const orderId = pendingRzpOrderIdRef.current;
+        if (orderId) {
+          try {
+            const paymentStatusResponse = await fetch(`/api/razorpay/order-status/${orderId}`);
+            if (paymentStatusResponse.ok) {
+              const paymentStatus = await paymentStatusResponse.json();
+              // A payment that has already completed must proceed through the
+              // existing payment handler instead of being presented as cancelled.
+              if (paymentStatus.paid) {
+                setIsRazorpayOpen(false);
+                return;
+              }
+            }
+          } catch {
+            // If status cannot be checked, close the payment UI but keep the
+            // pending checkout record so a late capture can still be recovered.
+          }
+        }
+
+        if (stopped) return;
+        stockInvalidatedRef.current = true;
+        pendingRzpOrderIdRef.current = null;
+        pendingSelectedAddressRef.current = null;
+        pendingStockItemsRef.current = [];
+        returningFromUpiRef.current = false;
+        setIsRazorpayOpen(false);
+        setIsProcessingPayment(false);
+        setIsCartOpen(true);
+        queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+        toast({
+          title: "Items went out of stock",
+          description: `${getStockIssueMessage(result)} The payment window has been closed. Please review your cart. If you already approved a UPI request, it may still complete.`,
+          variant: "destructive",
+        });
+        razorpayInstanceRef.current?.close();
+        razorpayInstanceRef.current = null;
+      } catch (err) {
+        // A temporary network error must not cancel payment; retry on the next poll.
+        console.warn("[checkout] Could not refresh stock during payment:", err);
+      } finally {
+        stockCheckInFlightRef.current = false;
+      }
+    };
+
+    const timer = window.setInterval(pollStock, 5_000);
+    document.addEventListener("visibilitychange", pollStock);
+    window.addEventListener("focus", pollStock);
+    void pollStock();
+
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", pollStock);
+      window.removeEventListener("focus", pollStock);
+    };
+  }, [isRazorpayOpen, selectedSubHub?.dbName, queryClient, setIsCartOpen, toast]);
 
   // Mobile UPI return: when the user comes back from GPay/PhonePe/etc., the browser
   // fires visibilitychange. We poll our backend to check if payment completed, then
@@ -1153,9 +1364,13 @@ export function CartDrawer() {
         orderClaimedRef.current = true;
         paymentSucceededRef.current = true;
         pendingRzpOrderIdRef.current = null;
+        pendingStockItemsRef.current = [];
+        setIsRazorpayOpen(false);
 
         createOrder({ ...buildOrderPayload(selected, statusData.paymentId), razorpayOrderId: orderId }, {
           onSuccess: () => {
+            setIsRazorpayOpen(false);
+            razorpayInstanceRef.current = null;
             setIsCartOpen(true);
             setIsSuccess(true);
             clearCart();
@@ -1166,6 +1381,8 @@ export function CartDrawer() {
           },
           onError: (err: any) => {
             paymentSucceededRef.current = false;
+            setIsRazorpayOpen(false);
+            razorpayInstanceRef.current = null;
             returningFromUpiRef.current = false;
             setIsProcessingPayment(false);
             setIsCartOpen(true);
