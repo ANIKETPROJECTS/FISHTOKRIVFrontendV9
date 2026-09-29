@@ -39,7 +39,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import {
   Sheet,
@@ -250,7 +250,7 @@ function getCartStockIssueRows(
       name: item.name,
       quantity: item.quantity,
       warning: paymentMayStillComplete && completelyOutOfStock
-      ? `${warning}. An approved UPI request may still complete.`
+        ? `${warning}. An approved UPI request may still complete.`
         : warning,
       details: relatedIssues
         .map((issue) => `${issue.name}: ${issue.available} available, ${issue.requested} requested`)
@@ -330,7 +330,7 @@ export function CartDrawer() {
   };
   const removeStockIssueItems = () => {
     const itemIds = new Set(stockIssueRows.map((row) => row.cartItemId));
-    itemIds.forEach(removeFromCart);
+    itemIds.forEach((id) => removeFromCart(id));
     setCartStockWarnings((current) => {
       const next = { ...current };
       itemIds.forEach((id) => delete next[id]);
@@ -1026,6 +1026,32 @@ export function CartDrawer() {
   const placeOrder = async () => {
     const selected = savedAddresses.find(a => a.id === activeAddressId);
     if (!selected) return;
+    const stockCheckItems = getStockCheckItems(items);
+    const isUpiCheckout = paymentMethod === "online" && finalTotal > 0;
+    if (isUpiCheckout && isHubReady) {
+      setIsProcessingPayment(true);
+      pendingStockItemsRef.current = stockCheckItems;
+      try {
+        // Check inventory before other checkout validation so an unavailable item
+        // is explained in the cart as soon as Pay via UPI is tapped.
+        const stockResult = await checkCheckoutStock(stockCheckItems, selectedSubHub?.dbName);
+        if (!stockResult.inStock) {
+          openStockIssueDialog(stockResult);
+          queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+          setIsProcessingPayment(false);
+          return;
+        }
+      } catch (stockError: any) {
+        setIsProcessingPayment(false);
+        toast({
+          title: "Could not check current stock",
+          description: stockError?.message || "Please try again before paying.",
+          variant: "destructive",
+        });
+        return;
+      }
+      setIsProcessingPayment(false);
+    }
     if (isPreorderCart) {
       if (!firstValidPreorderDate) {
         toast({
@@ -1097,27 +1123,7 @@ export function CartDrawer() {
     // UPI flow: go through Razorpay
     setIsProcessingPayment(true);
     stockInvalidatedRef.current = false;
-    const stockCheckItems = getStockCheckItems(items);
     pendingStockItemsRef.current = stockCheckItems;
-    try {
-      // Run a fresh server-side stock check as the first checkout request after
-      // the customer taps Pay via UPI; cached storefront quantities are not enough.
-      const stockResult = await checkCheckoutStock(stockCheckItems, selectedSubHub?.dbName);
-      if (!stockResult.inStock) {
-        setCartStockWarnings(getCartStockWarnings(items, stockResult));
-        setIsProcessingPayment(false);
-        queryClient.invalidateQueries({ queryKey: ["/api/products"] });
-        return;
-      }
-    } catch (stockError: any) {
-      setIsProcessingPayment(false);
-      toast({
-        title: "Could not check current stock",
-        description: stockError?.message || "Please try again before paying.",
-        variant: "destructive",
-      });
-      return;
-    }
 
     // Close the drawer BEFORE opening Razorpay so its Sheet backdrop doesn't sit on top
     // and intercept touch events on the Razorpay bottom sheet (mobile bug).
@@ -1148,10 +1154,10 @@ export function CartDrawer() {
         const errorData = await res.json().catch(() => null);
         const stockUnavailable = errorData?.code === "STOCK_UNAVAILABLE";
         if (stockUnavailable) {
-          setCartStockWarnings(getCartStockWarnings(items, {
+          openStockIssueDialog({
             inStock: false,
             unavailableItems: errorData?.unavailableItems ?? [],
-          }));
+          });
           queryClient.invalidateQueries({ queryKey: ["/api/products"] });
         } else {
           toast({
@@ -1181,7 +1187,7 @@ export function CartDrawer() {
         return;
       }
       if (!latestStock.inStock) {
-        setCartStockWarnings(getCartStockWarnings(items, latestStock));
+        openStockIssueDialog(latestStock);
         queryClient.invalidateQueries({ queryKey: ["/api/products"] });
         setIsProcessingPayment(false);
         setIsCartOpen(true);
@@ -1412,7 +1418,7 @@ export function CartDrawer() {
         }
 
         if (stopped) return;
-        setCartStockWarnings(getCartStockWarnings(items, result, true));
+        openStockIssueDialog(result, true);
         stockInvalidatedRef.current = true;
         pendingRzpOrderIdRef.current = null;
         pendingSelectedAddressRef.current = null;
@@ -2467,6 +2473,77 @@ export function CartDrawer() {
           )}
         </SheetContent>
       </Sheet>
+
+      <Dialog open={isStockIssueDialogOpen} onOpenChange={setIsStockIssueDialogOpen}>
+        <DialogContent
+          className="max-w-md rounded-3xl border border-rose-100 p-0 shadow-2xl"
+          data-testid="dialog-stock-unavailable"
+        >
+          <div className="p-6 sm:p-7">
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-rose-50 text-rose-600">
+              <AlertCircle className="h-6 w-6" aria-hidden="true" />
+            </div>
+            <DialogHeader className="space-y-2 text-left">
+              <DialogTitle className="text-xl font-bold text-slate-900">
+                {stockIssueRows.some((row) => row.warning.startsWith("Item went out of stock"))
+                  ? "Items went out of stock"
+                  : "Not enough stock for your cart"}
+              </DialogTitle>
+              <DialogDescription className="text-sm leading-relaxed text-slate-600">
+                The listed items are out of stock or don’t have enough quantity for your cart. Replace them, reduce the quantity, or remove them before paying.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="mt-5 max-h-64 space-y-2 overflow-y-auto pr-1" role="list">
+              {stockIssueRows.length > 0 ? stockIssueRows.map((row) => (
+                <div
+                  key={row.cartItemId}
+                  className="rounded-2xl border border-rose-100 bg-rose-50/60 p-3"
+                  role="listitem"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-900">{row.name}</p>
+                      <p className="mt-1 text-xs leading-relaxed text-slate-600">{row.details}</p>
+                    </div>
+                    <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-600">
+                      Qty {row.quantity}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-xs font-semibold text-rose-700">{row.warning}</p>
+                </div>
+              )) : (
+                <div className="rounded-2xl border border-rose-100 bg-rose-50/60 p-3 text-sm text-slate-700">
+                  One or more items are no longer available in the requested quantity.
+                </div>
+              )}
+            </div>
+
+            <div className="mt-6 flex flex-col-reverse gap-2.5 sm:flex-row">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setIsStockIssueDialogOpen(false);
+                  setIsCartOpen(false);
+                }}
+                className="h-11 flex-1 rounded-xl border-slate-200 font-semibold text-slate-700"
+                data-testid="button-find-replacements"
+              >
+                Find replacements
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={removeStockIssueItems}
+                disabled={stockIssueRows.length === 0}
+                className="h-11 flex-1 rounded-xl font-semibold"
+                data-testid="button-remove-unavailable-items"
+              >
+                Remove unavailable items
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Add Address Dialog (deprecated - now inline in drawer) */}
       <Dialog open={false} onOpenChange={setShowAddForm}>
