@@ -339,6 +339,10 @@ export function CartDrawer() {
     setStockIssueRows([]);
     setIsStockIssueDialogOpen(false);
   };
+  const findStockIssueReplacements = () => {
+    removeStockIssueItems();
+    setIsCartOpen(false);
+  };
   const [paymentMethod, setPaymentMethod] = useState<"cod" | "online">("online");
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const [showUnserviceablePopup, setShowUnserviceablePopup] = useState(false);
@@ -2522,10 +2526,7 @@ export function CartDrawer() {
             <div className="mt-6 flex flex-col-reverse gap-2.5 sm:flex-row">
               <Button
                 variant="outline"
-                onClick={() => {
-                  setIsStockIssueDialogOpen(false);
-                  setIsCartOpen(false);
-                }}
+                onClick={findStockIssueReplacements}
                 className="h-11 flex-1 rounded-xl border-slate-200 font-semibold text-slate-700"
                 data-testid="button-find-replacements"
               >
@@ -2538,7 +2539,7 @@ export function CartDrawer() {
                 className="h-11 flex-1 rounded-xl font-semibold"
                 data-testid="button-remove-unavailable-items"
               >
-                Remove unavailable items
+                Remove from current cart
               </Button>
             </div>
           </div>
