@@ -225,7 +225,6 @@ function getStockCheckItems(items: CartItem[]): StockCheckItem[] {
 function getCartStockIssueRows(
   items: CartItem[],
   result: StockCheckResult,
-  paymentMayStillComplete = false,
 ): CartStockIssueRow[] {
   const rows: CartStockIssueRow[] = [];
 
@@ -249,9 +248,7 @@ function getCartStockIssueRows(
       cartItemId: item.id,
       name: item.name,
       quantity: item.quantity,
-      warning: paymentMayStillComplete && completelyOutOfStock
-        ? `${warning}. An approved UPI request may still complete.`
-        : warning,
+      warning,
       details: relatedIssues
         .map((issue) => `${issue.name}: ${issue.available} available, ${issue.requested} requested`)
         .join("; "),
@@ -264,10 +261,9 @@ function getCartStockIssueRows(
 function getCartStockWarnings(
   items: CartItem[],
   result: StockCheckResult,
-  paymentMayStillComplete = false,
 ): Record<number, string> {
   return Object.fromEntries(
-    getCartStockIssueRows(items, result, paymentMayStillComplete)
+    getCartStockIssueRows(items, result)
       .map((row) => [row.cartItemId, row.warning]),
   );
 }
@@ -295,6 +291,11 @@ export function CartDrawer() {
   const [isSuccess, setIsSuccess] = useState(false);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
   const [isRazorpayOpen, setIsRazorpayOpen] = useState(false);
+  const razorpayOpenRef = useRef(false);
+  const updateRazorpayOpen = (open: boolean) => {
+    razorpayOpenRef.current = open;
+    setIsRazorpayOpen(open);
+  };
   const [cartStockWarnings, setCartStockWarnings] = useState<Record<number, string>>({});
   const [isStockIssueDialogOpen, setIsStockIssueDialogOpen] = useState(false);
   const [stockIssueRows, setStockIssueRows] = useState<CartStockIssueRow[]>([]);
@@ -311,17 +312,13 @@ export function CartDrawer() {
   // Mobile UPI return refs — store pending Razorpay order so we can poll when user comes back from GPay
   const pendingRzpOrderIdRef = useRef<string | null>(null);
   const pendingSelectedAddressRef = useRef<any>(null);
-  const pendingStockItemsRef = useRef<Array<{ productId: string; quantity: number; name: string }>>([]);
   const razorpayInstanceRef = useRef<any>(null);
-  const stockInvalidatedRef = useRef(false);
-  const stockCheckInFlightRef = useRef(false);
   const cartStockCheckInFlightRef = useRef(false);
+  const reportedStockIssueIdsRef = useRef<Set<number>>(new Set());
   const returningFromUpiRef = useRef(false);
-  const openStockIssueDialog = (
-    result: StockCheckResult,
-    paymentMayStillComplete = false,
-  ) => {
-    const rows = getCartStockIssueRows(items, result, paymentMayStillComplete);
+  const openStockIssueDialog = (result: StockCheckResult) => {
+    const rows = getCartStockIssueRows(items, result);
+    rows.forEach((row) => reportedStockIssueIdsRef.current.add(row.cartItemId));
     setCartStockWarnings(
       Object.fromEntries(rows.map((row) => [row.cartItemId, row.warning])),
     );
@@ -331,6 +328,7 @@ export function CartDrawer() {
   const removeStockIssueItems = () => {
     const itemIds = new Set(stockIssueRows.map((row) => row.cartItemId));
     itemIds.forEach((id) => removeFromCart(id));
+    itemIds.forEach((id) => reportedStockIssueIdsRef.current.delete(id));
     setCartStockWarnings((current) => {
       const next = { ...current };
       itemIds.forEach((id) => delete next[id]);
@@ -1034,7 +1032,6 @@ export function CartDrawer() {
     const isUpiCheckout = paymentMethod === "online" && finalTotal > 0;
     if (isUpiCheckout && isHubReady) {
       setIsProcessingPayment(true);
-      pendingStockItemsRef.current = stockCheckItems;
       try {
         // Check inventory before other checkout validation so an unavailable item
         // is explained in the cart as soon as Pay via UPI is tapped.
@@ -1126,8 +1123,6 @@ export function CartDrawer() {
 
     // UPI flow: go through Razorpay
     setIsProcessingPayment(true);
-    stockInvalidatedRef.current = false;
-    pendingStockItemsRef.current = stockCheckItems;
 
     // Close the drawer BEFORE opening Razorpay so its Sheet backdrop doesn't sit on top
     // and intercept touch events on the Razorpay bottom sheet (mobile bug).
@@ -1219,13 +1214,12 @@ export function CartDrawer() {
             return;
           }
           orderClaimedRef.current = true;
-          setIsRazorpayOpen(false);
+          updateRazorpayOpen(false);
           razorpayInstanceRef.current = null;
           // Mark as succeeded and clear pending UPI refs so the visibilitychange listener doesn't double-process
           paymentSucceededRef.current = true;
           pendingRzpOrderIdRef.current = null;
           pendingSelectedAddressRef.current = null;
-          pendingStockItemsRef.current = [];
           try {
             const verifyRes = await fetch("/api/razorpay/verify-payment", {
               method: "POST",
@@ -1245,7 +1239,7 @@ export function CartDrawer() {
             }
             createOrder({ ...buildOrderPayload(selected, response.razorpay_payment_id), razorpayOrderId: order_id }, {
               onSuccess: () => {
-                setIsRazorpayOpen(false);
+                updateRazorpayOpen(false);
                 razorpayInstanceRef.current = null;
                 // Force the drawer open so the success screen is visible
                 setIsCartOpen(true);
@@ -1257,7 +1251,7 @@ export function CartDrawer() {
               },
               onError: (err: any) => {
                 paymentSucceededRef.current = false;
-                setIsRazorpayOpen(false);
+                updateRazorpayOpen(false);
                 razorpayInstanceRef.current = null;
                 setIsProcessingPayment(false);
                 setIsCartOpen(true);
@@ -1272,18 +1266,13 @@ export function CartDrawer() {
         },
         modal: {
           ondismiss: () => {
-            setIsRazorpayOpen(false);
+            updateRazorpayOpen(false);
             razorpayInstanceRef.current = null;
-            if (stockInvalidatedRef.current) {
-              stockInvalidatedRef.current = false;
-              return;
-            }
             // Suppress if payment already succeeded OR if we're actively polling after returning from a UPI app
             if (paymentSucceededRef.current || returningFromUpiRef.current) return;
             // User closed the modal — treat as cancellation and reset state
             pendingRzpOrderIdRef.current = null;
             pendingSelectedAddressRef.current = null;
-            pendingStockItemsRef.current = [];
             setIsProcessingPayment(false);
             setIsCartOpen(true);
             toast({ title: "Payment cancelled", variant: "destructive" });
@@ -1297,19 +1286,17 @@ export function CartDrawer() {
       pendingRzpOrderIdRef.current = order_id;
       pendingSelectedAddressRef.current = selected;
       orderClaimedRef.current = false;
-      stockInvalidatedRef.current = false;
 
       const rzp = new (window as any).Razorpay(options);
       razorpayInstanceRef.current = rzp;
+      updateRazorpayOpen(true);
       rzp.open();
-      setIsRazorpayOpen(true);
     } catch {
       toast({ title: "Payment failed. Please try again.", variant: "destructive" });
-      setIsRazorpayOpen(false);
+      updateRazorpayOpen(false);
       razorpayInstanceRef.current = null;
       pendingRzpOrderIdRef.current = null;
       pendingSelectedAddressRef.current = null;
-      pendingStockItemsRef.current = [];
       setIsProcessingPayment(false);
       setIsCartOpen(true);
     }
@@ -1326,36 +1313,77 @@ export function CartDrawer() {
   }, [isCartOpen]);
 
   // Keep availability current for every item in the cart, even when the drawer
-  // is closed. Razorpay has its own polling effect below while payment is open.
+  // is closed. Pause stock polling once the Razorpay checkout is open or payment
+  // is pending, including while the customer switches to an external UPI app.
   useEffect(() => {
     if (items.length === 0) {
+      reportedStockIssueIdsRef.current.clear();
       setCartStockWarnings((current) =>
         Object.keys(current).length === 0 ? current : {},
       );
+      setStockIssueRows([]);
+      setIsStockIssueDialogOpen(false);
       return;
     }
     if (!isHubReady || !selectedSubHub?.dbName) {
+      reportedStockIssueIdsRef.current.clear();
       setCartStockWarnings((current) =>
         Object.keys(current).length === 0 ? current : {},
       );
+      setStockIssueRows([]);
+      setIsStockIssueDialogOpen(false);
       return;
     }
-    if (isRazorpayOpen) return;
+    if (
+      isRazorpayOpen ||
+      pendingRzpOrderIdRef.current ||
+      (paymentSucceededRef.current && isProcessingPayment)
+    ) return;
 
     let stopped = false;
     const hubDbName = selectedSubHub.dbName;
 
     const pollCartStock = async () => {
-      if (stopped || cartStockCheckInFlightRef.current) return;
+      if (
+        stopped ||
+        razorpayOpenRef.current ||
+        pendingRzpOrderIdRef.current ||
+        cartStockCheckInFlightRef.current
+      ) return;
       cartStockCheckInFlightRef.current = true;
       try {
         const result = await checkCheckoutStock(getStockCheckItems(items), hubDbName);
-        if (stopped) return;
+        if (
+          stopped ||
+          razorpayOpenRef.current ||
+          pendingRzpOrderIdRef.current ||
+          paymentSucceededRef.current
+        ) return;
 
         const nextWarnings = getCartStockWarnings(items, result);
-        setCartStockWarnings((current) =>
-          areStockWarningsEqual(current, nextWarnings) ? current : nextWarnings,
+        const nextIssueIds = new Set(Object.keys(nextWarnings).map(Number));
+        reportedStockIssueIdsRef.current.forEach((id) => {
+          if (!nextIssueIds.has(id)) reportedStockIssueIdsRef.current.delete(id);
+        });
+        const hasNewIssue = [...nextIssueIds].some(
+          (id) => !reportedStockIssueIdsRef.current.has(id),
         );
+
+        if (hasNewIssue) {
+          openStockIssueDialog(result);
+        } else {
+          setCartStockWarnings((current) =>
+            areStockWarningsEqual(current, nextWarnings) ? current : nextWarnings,
+          );
+          if (isStockIssueDialogOpen) {
+            if (nextIssueIds.size > 0) {
+              setStockIssueRows(getCartStockIssueRows(items, result));
+            } else {
+              setStockIssueRows([]);
+              setIsStockIssueDialogOpen(false);
+            }
+          }
+        }
       } catch (error) {
         if (!stopped) {
           console.warn("[cart] Could not refresh cart stock:", error);
@@ -1376,84 +1404,7 @@ export function CartDrawer() {
       document.removeEventListener("visibilitychange", pollCartStock);
       window.removeEventListener("focus", pollCartStock);
     };
-  }, [items, isHubReady, selectedSubHub?.dbName, isRazorpayOpen]);
-
-  // Keep checking the database while Razorpay is open, including when the
-  // customer returns from an external UPI app. Close the checkout if stock no
-  // longer covers every line in the pending order.
-  useEffect(() => {
-    if (!isRazorpayOpen) return;
-    let stopped = false;
-
-    const pollStock = async () => {
-      if (
-        stopped ||
-        stockCheckInFlightRef.current ||
-        paymentSucceededRef.current ||
-        orderClaimedRef.current ||
-        pendingStockItemsRef.current.length === 0
-      ) return;
-
-      stockCheckInFlightRef.current = true;
-      try {
-        const result = await checkCheckoutStock(
-          pendingStockItemsRef.current,
-          selectedSubHub?.dbName,
-        );
-        if (stopped || result.inStock) return;
-
-        const orderId = pendingRzpOrderIdRef.current;
-        if (orderId) {
-          try {
-            const paymentStatusResponse = await fetch(`/api/razorpay/order-status/${orderId}`);
-            if (paymentStatusResponse.ok) {
-              const paymentStatus = await paymentStatusResponse.json();
-              // A payment that has already completed must proceed through the
-              // existing payment handler instead of being presented as cancelled.
-              if (paymentStatus.paid) {
-                setIsRazorpayOpen(false);
-                return;
-              }
-            }
-          } catch {
-            // If status cannot be checked, close the payment UI but keep the
-            // pending checkout record so a late capture can still be recovered.
-          }
-        }
-
-        if (stopped) return;
-        openStockIssueDialog(result, true);
-        stockInvalidatedRef.current = true;
-        pendingRzpOrderIdRef.current = null;
-        pendingSelectedAddressRef.current = null;
-        pendingStockItemsRef.current = [];
-        returningFromUpiRef.current = false;
-        setIsRazorpayOpen(false);
-        setIsProcessingPayment(false);
-        setIsCartOpen(true);
-        queryClient.invalidateQueries({ queryKey: ["/api/products"] });
-        razorpayInstanceRef.current?.close();
-        razorpayInstanceRef.current = null;
-      } catch (err) {
-        // A temporary network error must not cancel payment; retry on the next poll.
-        console.warn("[checkout] Could not refresh stock during payment:", err);
-      } finally {
-        stockCheckInFlightRef.current = false;
-      }
-    };
-
-    const timer = window.setInterval(pollStock, 5_000);
-    document.addEventListener("visibilitychange", pollStock);
-    window.addEventListener("focus", pollStock);
-    void pollStock();
-
-    return () => {
-      stopped = true;
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", pollStock);
-      window.removeEventListener("focus", pollStock);
-    };
-  }, [isRazorpayOpen, selectedSubHub?.dbName, queryClient, setIsCartOpen, items]);
+  }, [items, isHubReady, selectedSubHub?.dbName, isRazorpayOpen, isStockIssueDialogOpen, isProcessingPayment]);
 
   // Mobile UPI return: when the user comes back from GPay/PhonePe/etc., the browser
   // fires visibilitychange. We poll our backend to check if payment completed, then
@@ -1505,12 +1456,11 @@ export function CartDrawer() {
         orderClaimedRef.current = true;
         paymentSucceededRef.current = true;
         pendingRzpOrderIdRef.current = null;
-        pendingStockItemsRef.current = [];
-        setIsRazorpayOpen(false);
+        updateRazorpayOpen(false);
 
         createOrder({ ...buildOrderPayload(selected, statusData.paymentId), razorpayOrderId: orderId }, {
           onSuccess: () => {
-            setIsRazorpayOpen(false);
+            updateRazorpayOpen(false);
             razorpayInstanceRef.current = null;
             setIsCartOpen(true);
             setIsSuccess(true);
@@ -1522,7 +1472,7 @@ export function CartDrawer() {
           },
           onError: (err: any) => {
             paymentSucceededRef.current = false;
-            setIsRazorpayOpen(false);
+            updateRazorpayOpen(false);
             razorpayInstanceRef.current = null;
             returningFromUpiRef.current = false;
             setIsProcessingPayment(false);
