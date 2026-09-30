@@ -6,3 +6,18 @@ id = "8ABL7zuGnrVtUGlAcVmbK"
 uri = "file://WALLET_INTEGRATION_DOCS.md"
 type = "text"
 title = "Wallet Integration Docs — for Admin Side"
+logical_id = "a2b42663-facd-45c0-85a6-a933ed1fd8ec"
+
+[[outputs]]
+id = "Tx1MNgaGpgUKxhNOsPRAk"
+uri = "file://RAZORPAY_PAYMENT_ORDER_RECONCILIATION_PROMPT.md"
+type = "text"
+title = "Razorpay payment-to-order reconciliation prompt"
+description = "A ready-to-paste implementation prompt for the separate Admin-panel Replit, with safe matching, recovery rules, UI guidance, and acceptance tests."
+logical_id = "401feb66-6141-4349-ba8f-d8c734bf3d69"
+content_hash = "sha256:52bfd673379e5e098743e350799d27ec9653e33cdad39be9fa975bfba8a43eb1"
+size = 9374
+mtime_ms = 1790779837520
+storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:9260a6a2-44d5-4ee5-960a-82e2de243a97/401feb66-6141-4349-ba8f-d8c734bf3d69/29fa1349-4a2d-4aef-ab31-80d648070adf"
+storage_version_token = "1790779861560379"
+content_type = "text/markdown"
