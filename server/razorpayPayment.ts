@@ -56,7 +56,11 @@ export function buildSuccessfulRazorpayPaymentState({
 }
 
 export function isSuccessfulRazorpayStatus(status: unknown): boolean {
-  return status === "captured" || status === "authorized";
+  return status === "captured";
+}
+
+export function shouldValidatePrePaymentGuards(hasCapturedPayment: boolean): boolean {
+  return !hasCapturedPayment;
 }
 
 /**

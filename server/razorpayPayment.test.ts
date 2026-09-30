@@ -4,6 +4,7 @@ import {
   buildSuccessfulRazorpayPaymentState,
   isFtwStorefrontOrder,
   isSuccessfulRazorpayStatus,
+  shouldValidatePrePaymentGuards,
 } from "./razorpayPayment";
 
 test("successful Razorpay payments are fully paid for every delivery date/slot", () => {
@@ -52,12 +53,16 @@ test("wallet plus Razorpay payment remains fully paid", () => {
   );
 });
 
-test("failed, cancelled, and pending Razorpay statuses are not successful", () => {
-  for (const status of ["failed", "cancelled", "created", "authorized_pending"]) {
+test("only captured Razorpay payments are successful", () => {
+  for (const status of ["failed", "cancelled", "created", "authorized_pending", "authorized", "refunded"]) {
     assert.equal(isSuccessfulRazorpayStatus(status), false, status);
   }
   assert.equal(isSuccessfulRazorpayStatus("captured"), true);
-  assert.equal(isSuccessfulRazorpayStatus("authorized"), true);
+});
+
+test("pre-payment guards stop re-running after verified capture", () => {
+  assert.equal(shouldValidatePrePaymentGuards(false), true);
+  assert.equal(shouldValidatePrePaymentGuards(true), false);
 });
 
 test("callback retry replaces the existing UPI entry instead of duplicating it", () => {

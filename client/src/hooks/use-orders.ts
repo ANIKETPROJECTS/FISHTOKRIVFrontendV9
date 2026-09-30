@@ -19,6 +19,40 @@ export function useCreateOrder() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (data: InsertOrderRequest) => {
+      if (data.razorpayOrderId) {
+        const razorpayPaymentId = data.payments?.find(
+          (payment) => payment.mode === "upi" && payment.reference,
+        )?.reference;
+        if (!razorpayPaymentId) {
+          throw new Error("Razorpay payment reference is missing");
+        }
+        let lastError = "Failed to finalize Razorpay payment";
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            const finalizeRes = await fetch("/api/razorpay/finalize-order", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                razorpayOrderId: data.razorpayOrderId,
+                razorpayPaymentId,
+              }),
+            });
+            if (finalizeRes.ok) {
+              return await finalizeRes.json() as OrderRequest;
+            }
+            const error = await finalizeRes.json().catch(() => ({}));
+            lastError = error.message || lastError;
+            if (finalizeRes.status < 500) break;
+          } catch (error: any) {
+            lastError = error?.message || lastError;
+          }
+          if (attempt < 2) {
+            await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+          }
+        }
+        throw new Error(lastError);
+      }
+
       const hubDbName = getActiveHubDb();
       const res = await fetch(api.orders.create.path, {
         method: api.orders.create.method,

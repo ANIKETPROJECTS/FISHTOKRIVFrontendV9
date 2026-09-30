@@ -24,6 +24,7 @@ import {
   buildSuccessfulRazorpayPaymentState,
   isFtwStorefrontOrder,
   isSuccessfulRazorpayStatus,
+  shouldValidatePrePaymentGuards,
 } from "./razorpayPayment";
 
 declare module "express-session" {
@@ -744,7 +745,9 @@ export async function registerRoutes(
     return {
       id: String(payment.id),
       orderId: String(payment.order_id),
+      amountPaise: Number(payment.amount ?? 0),
       amount: Number(payment.amount ?? 0) / 100,
+      currency: String(payment.currency ?? ""),
     };
   };
 
@@ -754,6 +757,23 @@ export async function registerRoutes(
       const { amount, orderPayload } = req.body;
       if (!amount || typeof amount !== "number" || amount <= 0) {
         return res.status(400).json({ message: "Invalid amount" });
+      }
+      if (!orderPayload || typeof orderPayload !== "object" || Array.isArray(orderPayload)) {
+        return res.status(400).json({ message: "An order payload is required to start payment." });
+      }
+      const checkoutTotal = Number(orderPayload.total);
+      const walletAmount = (Array.isArray(orderPayload.payments) ? orderPayload.payments : [])
+        .filter((payment: any) => payment?.mode === "wallet")
+        .reduce((sum: number, payment: any) => sum + Number(payment.amount ?? 0), 0);
+      const expectedAmountPaise = Math.round((checkoutTotal - walletAmount) * 100);
+      if (
+        !Number.isFinite(checkoutTotal) ||
+        checkoutTotal <= 0 ||
+        !Number.isFinite(walletAmount) ||
+        expectedAmountPaise <= 0 ||
+        Math.round(amount * 100) !== expectedAmountPaise
+      ) {
+        return res.status(400).json({ message: "Payment amount does not match the checkout total." });
       }
       if (orderPayload && typeof orderPayload === "object") {
         const hub = await getCheckoutHubModels(orderPayload.hubDbName);
@@ -799,26 +819,273 @@ export async function registerRoutes(
         receipt: `ft_${Date.now()}`,
       });
 
-      // Store the full order payload so the webhook can reconstruct the order if
-      // the browser closes before the client-side handler fires.
-      if (orderPayload && typeof orderPayload === "object") {
-        try {
-          const PendingCheckout = getPendingCheckoutModel();
-          await PendingCheckout.findOneAndUpdate(
-            { razorpayOrderId: order.id },
-            { razorpayOrderId: order.id, orderPayload },
-            { upsert: true, new: true }
-          );
-        } catch (storeErr) {
-          // Non-fatal — webhook fallback just won't have the payload
-          console.error("[Razorpay] Failed to store pending checkout:", storeErr);
-        }
+      // Payment must not be presented to the shopper unless the server has a
+      // durable recovery payload for webhook/reconciliation finalization.
+      try {
+        const PendingCheckout = getPendingCheckoutModel();
+        await PendingCheckout.findOneAndUpdate(
+          { razorpayOrderId: order.id },
+          {
+            $set: {
+              razorpayOrderId: order.id,
+              orderPayload,
+              amountPaise: order.amount,
+              currency: order.currency,
+              finalizationStatus: "pending",
+              autoRecoveryEligible: true,
+              finalizationAttempts: 0,
+              finalizedOrderId: null,
+              lastFinalizationError: null,
+            },
+            $setOnInsert: { createdAt: new Date() },
+          },
+          { upsert: true, new: true },
+        );
+      } catch (storeErr) {
+        console.error("[Razorpay] Failed to store pending checkout; payment order withheld:", storeErr);
+        return res.status(503).json({
+          message: "Could not safely prepare this payment. Please try again.",
+        });
       }
 
       return res.json({ order_id: order.id, amount: order.amount, currency: order.currency });
     } catch (err: any) {
       console.error("[Razorpay] create-order error:", err);
       return res.status(500).json({ message: "Failed to create payment order" });
+    }
+  });
+
+  const finalizeCapturedRazorpayPayment = async (
+    razorpayOrderId: string,
+    razorpayPaymentId: string,
+  ) => {
+    const verifiedPayment = await fetchVerifiedRazorpayPayment(razorpayOrderId, razorpayPaymentId);
+    if (!verifiedPayment) {
+      throw Object.assign(new Error("Razorpay payment has not been captured."), { statusCode: 400 });
+    }
+    if (verifiedPayment.currency && verifiedPayment.currency !== "INR") {
+      throw Object.assign(new Error("Razorpay payment currency does not match the checkout."), { statusCode: 400 });
+    }
+
+    const PendingCheckout = getPendingCheckoutModel();
+    const OrderModel = getOrderModel();
+    const pending = await PendingCheckout.findOne({ razorpayOrderId }).lean() as any;
+    if (!pending?.orderPayload) {
+      throw Object.assign(new Error("No recoverable checkout payload exists for this payment."), { statusCode: 503 });
+    }
+    if (pending.amountPaise != null && Number(pending.amountPaise) !== verifiedPayment.amountPaise) {
+      throw Object.assign(new Error("Captured payment amount does not match the stored checkout."), { statusCode: 400 });
+    }
+    if (pending.currency && verifiedPayment.currency && pending.currency !== verifiedPayment.currency) {
+      throw Object.assign(new Error("Captured payment currency does not match the stored checkout."), { statusCode: 400 });
+    }
+
+    const markFinalized = async (order: any) => {
+      await PendingCheckout.updateOne(
+        { razorpayOrderId },
+        {
+          $set: {
+            finalizationStatus: "finalized",
+            finalizationLockAt: null,
+            finalizedOrderId: order?.orderId ? String(order.orderId) : null,
+            lastFinalizationError: null,
+            lastAttemptAt: new Date(),
+          },
+        },
+      );
+      return order;
+    };
+
+    const findExistingOrder = () => OrderModel.findOne({
+      $or: [
+        { razorpayOrderId },
+        { "payments.reference": razorpayPaymentId },
+        { upiTransactionId: razorpayPaymentId },
+      ],
+    }).lean() as Promise<any>;
+
+    const repairExistingOrder = async (existing: any) => {
+      let orderToRepair = existing;
+      const latestFinalization = !orderToRepair.orderId
+        ? await PendingCheckout.findOne({ razorpayOrderId })
+            .select("finalizationStatus finalizationLockAt")
+            .lean() as any
+        : null;
+      const finalizationState = latestFinalization ?? pending;
+      const hasActiveFinalizationLease =
+        finalizationState.finalizationStatus === "processing" &&
+        finalizationState.finalizationLockAt &&
+        new Date(finalizationState.finalizationLockAt).getTime() > Date.now() - 2 * 60 * 1000;
+      if (!orderToRepair.orderId && hasActiveFinalizationLease) {
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          const fresh = await OrderModel.findById(existing._id).lean() as any;
+          if (fresh?.orderId) {
+            orderToRepair = fresh;
+            break;
+          }
+        }
+        if (!orderToRepair.orderId) {
+          throw Object.assign(new Error("The order is still being saved; retry shortly."), { statusCode: 503 });
+        }
+      }
+      if (!isFtwStorefrontOrder(orderToRepair)) {
+        throw Object.assign(new Error("This payment is linked to a non-storefront order and needs manual review."), { statusCode: 409 });
+      }
+      if (!orderToRepair.orderId) {
+        const generatedOrderId = await generateOrderId();
+        const assigned = await OrderModel.findOneAndUpdate(
+          {
+            _id: orderToRepair._id,
+            $or: [{ orderId: null }, { orderId: { $exists: false } }, { orderId: "" }],
+          },
+          { $set: { orderId: generatedOrderId, updatedAt: new Date() } },
+          { new: true },
+        ).lean() as any;
+        orderToRepair = assigned ?? await OrderModel.findById(orderToRepair._id).lean() as any;
+        if (!orderToRepair?.orderId) {
+          throw Object.assign(new Error("The storefront order number is still being assigned."), { statusCode: 503 });
+        }
+      }
+      const paymentState = buildSuccessfulRazorpayPaymentState({
+        total: Number(orderToRepair.total ?? verifiedPayment.amount),
+        paymentAmount: verifiedPayment.amount,
+        paymentId: verifiedPayment.id,
+        existingPayments: orderToRepair.payments,
+      });
+      const repaired = await OrderModel.findByIdAndUpdate(
+        orderToRepair._id,
+        { $set: { ...paymentState, razorpayOrderId, updatedAt: new Date() } },
+        { new: true },
+      ).lean();
+      return markFinalized({ ...(repaired ?? orderToRepair), id: String(orderToRepair._id) });
+    };
+
+    const existing = await findExistingOrder();
+    if (existing) return repairExistingOrder(existing);
+    // Historical records without an explicit eligibility marker may already
+    // have a manual replacement order. Repair existing FTW orders above, but
+    // never create a new order automatically for those records.
+    if (
+      pending.autoRecoveryEligible !== true ||
+      !["pending", "retryable", "processing", "finalized"].includes(pending.finalizationStatus)
+    ) {
+      throw Object.assign(new Error("This older checkout requires manual review."), { statusCode: 409 });
+    }
+    if (pending.finalizationStatus === "finalized") {
+      throw Object.assign(new Error("Finalization is marked complete but its order cannot be found."), { statusCode: 503 });
+    }
+
+    const now = new Date();
+    const staleLockBefore = new Date(now.getTime() - 2 * 60 * 1000);
+    const claimed = await PendingCheckout.findOneAndUpdate(
+      {
+        razorpayOrderId,
+        finalizationStatus: { $in: ["pending", "retryable", "processing"] },
+        $or: [
+          { finalizationStatus: { $ne: "processing" } },
+          { finalizationLockAt: { $lte: staleLockBefore } },
+          { finalizationLockAt: null },
+        ],
+      },
+      {
+        $set: {
+          finalizationStatus: "processing",
+          finalizationLockAt: now,
+          lastAttemptAt: now,
+          lastFinalizationError: null,
+        },
+        $inc: { finalizationAttempts: 1 },
+      },
+      { new: true },
+    ).lean();
+
+    if (!claimed) {
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const concurrentOrder = await findExistingOrder();
+        if (concurrentOrder) return repairExistingOrder(concurrentOrder);
+      }
+      throw Object.assign(new Error("Payment finalization is already in progress; retry shortly."), { statusCode: 503 });
+    }
+
+    try {
+      const walletPayments = (pending.orderPayload.payments ?? [])
+        .filter((payment: any) => payment.mode === "wallet");
+      const orderPayload = {
+        ...pending.orderPayload,
+        razorpayOrderId,
+        ...buildSuccessfulRazorpayPaymentState({
+          total: Number(pending.orderPayload.total ?? verifiedPayment.amount),
+          paymentAmount: verifiedPayment.amount,
+          paymentId: verifiedPayment.id,
+          existingPayments: walletPayments,
+        }),
+      };
+      const port = process.env.PORT || "5000";
+      const postOrder = (allowInventoryReview: boolean) => fetch(`http://127.0.0.1:${port}/api/orders`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-FishTokri-Payment-Finalizer": "1",
+          ...(allowInventoryReview ? { "X-FishTokri-Paid-Recovery": "1" } : {}),
+        },
+        body: JSON.stringify(orderPayload),
+      });
+
+      let createResponse = await postOrder(false);
+      if (createResponse.status === 409) {
+        const conflict = await createResponse.json().catch(() => ({})) as any;
+        if (conflict.code === "STOCK_UNAVAILABLE") {
+          createResponse = await postOrder(true);
+        } else {
+          throw Object.assign(new Error("Order finalization was rejected."), { statusCode: 503 });
+        }
+      }
+      if (!createResponse.ok) {
+        throw Object.assign(new Error(`Order finalization endpoint returned ${createResponse.status}.`), { statusCode: 503 });
+      }
+
+      const created = await createResponse.json() as any;
+      const savedOrder = await OrderModel.findOne({ razorpayOrderId }).select("orderId").lean() as any;
+      const finalizedOrderId = savedOrder?.orderId ?? created.orderId;
+      if (!finalizedOrderId) {
+        throw Object.assign(new Error("The storefront order number has not been saved yet."), { statusCode: 503 });
+      }
+      await markFinalized({ orderId: finalizedOrderId });
+      return created;
+    } catch (error) {
+      await PendingCheckout.updateOne(
+        { razorpayOrderId, finalizationStatus: "processing" },
+        {
+          $set: {
+            finalizationStatus: "retryable",
+            finalizationLockAt: null,
+            lastAttemptAt: new Date(),
+            lastFinalizationError: "Order creation did not complete.",
+          },
+        },
+      );
+      throw error;
+    }
+  };
+
+  app.post("/api/razorpay/finalize-order", async (req, res) => {
+    if (!razorpay) return res.status(503).json({ message: "Payment service not configured" });
+    const razorpayOrderId = String(req.body?.razorpayOrderId ?? "");
+    const razorpayPaymentId = String(req.body?.razorpayPaymentId ?? "");
+    if (!razorpayOrderId || !razorpayPaymentId) {
+      return res.status(400).json({ message: "Razorpay order and payment IDs are required." });
+    }
+    try {
+      const order = await finalizeCapturedRazorpayPayment(razorpayOrderId, razorpayPaymentId);
+      return res.json(order);
+    } catch (error: any) {
+      console.error(`[Razorpay finalize] Failed for order ${razorpayOrderId}:`, error?.message ?? "unknown error");
+      const statusCode = error?.statusCode === 400 || error?.statusCode === 409 ? error.statusCode : 503;
+      return res.status(statusCode).json({
+        message: error?.message || "Could not finalize payment. It will be retried.",
+      });
     }
   });
 
@@ -852,114 +1119,92 @@ export async function registerRoutes(
     }
 
     const event = req.body;
-    // Only handle payment.captured; acknowledge all other events immediately
     if (event.event !== "payment.captured") {
       return res.status(200).json({ message: "Event ignored" });
     }
-
     const payment = event.payload?.payment?.entity;
     if (!payment?.id || !payment?.order_id) {
       return res.status(400).json({ message: "Invalid payment payload" });
     }
 
-    const razorpayPaymentId: string = payment.id;
-    const razorpayOrderId: string = payment.order_id;
-    const amountPaid: number = (payment.amount ?? 0) / 100; // Razorpay sends paise
-
-    console.log(`[Razorpay webhook] payment.captured: payment_id=${razorpayPaymentId} order_id=${razorpayOrderId} amount=₹${amountPaid}`);
-
     try {
-      // Idempotency: skip if a FishTokri order already exists for this payment
-      const OrderModel = getOrderModel();
-      const existing = await OrderModel.findOne({
-        $or: [
-          { razorpayOrderId },
-          { "payments.reference": razorpayPaymentId },
-          { upiTransactionId: razorpayPaymentId },
-        ],
-      }).lean();
-      if (existing) {
-        if (isFtwStorefrontOrder(existing as any)) {
-          const paymentState = buildSuccessfulRazorpayPaymentState({
-            total: Number((existing as any).total ?? amountPaid),
-            paymentAmount: amountPaid,
-            paymentId: razorpayPaymentId,
-            existingPayments: (existing as any).payments,
-          });
-          await OrderModel.updateOne(
-            { _id: (existing as any)._id },
-            {
-              $set: {
-                ...paymentState,
-                razorpayOrderId,
-                updatedAt: new Date(),
-              },
-            },
-          );
-          console.log(`[Razorpay webhook] Repaired FTW payment metadata for ${razorpayPaymentId}`);
-        } else {
-          console.log(`[Razorpay webhook] Non-FTW order already exists for payment ${razorpayPaymentId} — skipping`);
-        }
-        return res.status(200).json({ message: "Already processed" });
+      await finalizeCapturedRazorpayPayment(String(payment.order_id), String(payment.id));
+      return res.status(200).json({ message: "OK" });
+    } catch (error: any) {
+      console.error(
+        `[Razorpay webhook] Finalization failed for order ${payment.order_id}:`,
+        error?.message ?? "unknown error",
+      );
+      if (error?.statusCode === 400 || error?.statusCode === 409) {
+        return res.status(200).json({ message: "Payment requires manual review" });
       }
-
-      // Fetch the pending checkout payload saved at create-order time
-      const PendingCheckout = getPendingCheckoutModel();
-      const pending = await PendingCheckout.findOne({ razorpayOrderId }).lean() as any;
-      if (!pending?.orderPayload) {
-        console.warn(`[Razorpay webhook] No pending checkout found for Razorpay order ${razorpayOrderId} — cannot reconstruct order`);
-        return res.status(200).json({ message: "No pending checkout" });
-      }
-
-      // Build the complete order payload: merge stored payload with actual payment details
-      const walletPayments = (pending.orderPayload.payments ?? []).filter((p: any) => p.mode === "wallet");
-      const paidAt = new Date().toISOString();
-      const orderPayload = {
-        ...pending.orderPayload,
-        razorpayOrderId,
-        ...buildSuccessfulRazorpayPaymentState({
-          total: Number(pending.orderPayload.total ?? amountPaid),
-          paymentAmount: amountPaid,
-          paymentId: razorpayPaymentId,
-          existingPayments: walletPayments,
-          paidAt: new Date(paidAt),
-        }),
-      };
-
-      // Create the order via the existing /api/orders route (reuses all validation,
-      // inventory deduction, coupon tracking, and WhatsApp notification logic).
-      const port = process.env.PORT || "5000";
-      const createRes = await fetch(`http://localhost:${port}/api/orders`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-FishTokri-Paid-Recovery": "1",
-        },
-        body: JSON.stringify(orderPayload),
-      });
-
-      if (createRes.ok) {
-        const created = await createRes.json() as any;
-        console.log(
-          `[Razorpay webhook] Order created: orderId=${created.orderId ?? created.id} ` +
-          `for payment ${razorpayPaymentId}; inventory review required`,
-        );
-        // Clean up the pending checkout
-        await PendingCheckout.deleteOne({ razorpayOrderId });
-      } else {
-        const errText = await createRes.text();
-        console.error(`[Razorpay webhook] Order creation failed (${createRes.status}): ${errText}`);
-        // Do not delete the pending checkout. It remains recoverable by the
-        // reconciliation process/admin while Razorpay retries transient errors.
-      }
-    } catch (err) {
-      console.error("[Razorpay webhook] Unexpected error:", err);
+      return res.status(503).json({ message: "Order finalization will be retried" });
     }
-
-    // Always return 200 — non-200 causes Razorpay to retry, which is only correct
-    // for transient infra errors (handled above with logging instead).
-    return res.status(200).json({ message: "OK" });
   });
+
+  if (razorpay && process.env.NODE_ENV === "production") {
+    let reconciliationRunning = false;
+    const reconcilePendingCheckouts = async () => {
+      if (reconciliationRunning) return;
+      reconciliationRunning = true;
+      try {
+        const PendingCheckout = getPendingCheckoutModel();
+        const now = new Date();
+        const retryBefore = new Date(now.getTime() - 5 * 60 * 1000);
+        const staleLockBefore = new Date(now.getTime() - 2 * 60 * 1000);
+        const pendingCheckouts = await PendingCheckout.find({
+          createdAt: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) },
+          autoRecoveryEligible: true,
+          finalizationStatus: { $in: ["pending", "retryable", "processing"] },
+          $and: [
+            {
+              $or: [
+                { finalizationStatus: { $ne: "processing" } },
+                { finalizationLockAt: { $lte: staleLockBefore } },
+                { finalizationLockAt: null },
+              ],
+            },
+            {
+              $or: [
+                { reconciliationCheckedAt: null },
+                { reconciliationCheckedAt: { $lte: retryBefore } },
+              ],
+            },
+          ],
+        }).sort({ createdAt: 1 }).limit(20).lean() as any[];
+
+        for (const pending of pendingCheckouts) {
+          await PendingCheckout.updateOne(
+            { _id: pending._id },
+            { $set: { reconciliationCheckedAt: new Date() } },
+          );
+          try {
+            const payments = await (razorpay as any).orders.fetchPayments(pending.razorpayOrderId);
+            const captured = (payments.items ?? []).find((item: any) => item.status === "captured");
+            if (captured?.id) {
+              await finalizeCapturedRazorpayPayment(
+                String(pending.razorpayOrderId),
+                String(captured.id),
+              );
+            }
+          } catch (error: any) {
+            console.error(
+              `[Razorpay reconcile] Retry failed for order ${pending.razorpayOrderId}:`,
+              error?.message ?? "unknown error",
+            );
+          }
+        }
+      } catch (error) {
+        console.error("[Razorpay reconcile] Pending checkout scan failed:", error);
+      } finally {
+        reconciliationRunning = false;
+      }
+    };
+    const reconciliationTimer = setInterval(() => {
+      void reconcilePendingCheckouts();
+    }, 5 * 60 * 1000);
+    reconciliationTimer.unref?.();
+  }
 
   // Mobile UPI return: check if a Razorpay order has been paid (verifies server-side)
   app.get("/api/razorpay/order-status/:orderId", async (req, res) => {
@@ -968,7 +1213,7 @@ export async function registerRoutes(
       const { orderId } = req.params;
       const payments = await razorpay.orders.fetchPayments(orderId) as any;
       const captured = (payments.items ?? []).find(
-        (p: any) => p.status === "captured" || p.status === "authorized"
+        (p: any) => p.status === "captured"
       );
       if (captured) {
         const secret = process.env.RAZORPAY_KEY_SECRET!;
@@ -995,10 +1240,14 @@ export async function registerRoutes(
       const generated = createHmac("sha256", secret)
         .update(`${razorpay_order_id}|${razorpay_payment_id}`)
         .digest("hex");
-      if (generated === razorpay_signature) {
-        return res.json({ verified: true });
+      if (generated !== razorpay_signature) {
+        return res.status(400).json({ verified: false, message: "Signature mismatch" });
       }
-      return res.status(400).json({ verified: false, message: "Signature mismatch" });
+      const payment = await fetchVerifiedRazorpayPayment(razorpay_order_id, razorpay_payment_id);
+      if (!payment) {
+        return res.status(400).json({ verified: false, message: "Razorpay payment is not captured" });
+      }
+      return res.json({ verified: true });
     } catch (err) {
       console.error("[Razorpay] verify error:", err);
       return res.status(500).json({ message: "Verification error" });
@@ -1007,21 +1256,85 @@ export async function registerRoutes(
 
   // Orders routes
   app.post(api.orders.create.path, async (req, res) => {
+    const inventoryDeductionJournal: Array<{
+      mode: "quantity" | "batch";
+      productId: string;
+      batchId?: any;
+      quantity: number;
+    }> = [];
+    let inventoryHub: any = null;
+    let inventoryCommitted = false;
+    const rollbackInventoryDeductions = async () => {
+      if (inventoryCommitted || !inventoryHub || inventoryDeductionJournal.length === 0) return;
+      for (const deduction of [...inventoryDeductionJournal].reverse()) {
+        try {
+          if (deduction.mode === "quantity") {
+            await inventoryHub.Product.findByIdAndUpdate(deduction.productId, {
+              $inc: { quantity: deduction.quantity },
+              $set: { updatedAt: new Date() },
+            });
+          } else {
+            const restored = await inventoryHub.Product.findOneAndUpdate(
+              { _id: deduction.productId, "inventoryBatches._id": deduction.batchId },
+              {
+                $inc: { "inventoryBatches.$.quantity": deduction.quantity },
+                $set: { updatedAt: new Date() },
+              },
+            );
+            if (!restored) {
+              console.error(`[Inventory] Could not roll back a batch deduction for product ${deduction.productId}`);
+            }
+          }
+        } catch (rollbackErr) {
+          console.error("[Inventory] Deduction rollback failed:", rollbackErr);
+        }
+      }
+      inventoryDeductionJournal.length = 0;
+    };
     try {
       const input = api.orders.create.input.parse(req.body);
-      // A captured payment must never disappear just because inventory changed
-      // between checkout and webhook delivery. The webhook sets this internal
-      // header so we record a paid order for admin resolution without deducting
-      // stock a second time or rejecting the payment.
-      const recoveryHeader = req.headers["x-fishtokri-paid-recovery"] === "1";
       const localAddress = req.socket.remoteAddress ?? "";
-      const isPaidWebhookRecovery = recoveryHeader &&
-        (localAddress === "127.0.0.1" || localAddress === "::1" || localAddress === "::ffff:127.0.0.1");
+      const isLocalRequest =
+        localAddress === "127.0.0.1" ||
+        localAddress === "::1" ||
+        localAddress === "::ffff:127.0.0.1";
+      const isInternalPaymentFinalizer =
+        req.headers["x-fishtokri-payment-finalizer"] === "1" && isLocalRequest;
+      const isPaidWebhookRecovery =
+        req.headers["x-fishtokri-paid-recovery"] === "1" &&
+        isInternalPaymentFinalizer;
+      const requestUpiReference =
+        (input.payments ?? []).find((payment: any) => payment.mode === "upi" && payment.reference)?.reference ?? null;
+
+      // All Razorpay order writes must pass through the serialized finalizer.
+      if ((input.razorpayOrderId || requestUpiReference) && !isInternalPaymentFinalizer) {
+        return res.status(403).json({ message: "Razorpay orders must use the payment finalization endpoint." });
+      }
+
+      let verifiedRazorpayPayment: Awaited<ReturnType<typeof fetchVerifiedRazorpayPayment>> | null = null;
+      if (input.razorpayOrderId || requestUpiReference) {
+        if (!input.razorpayOrderId || !requestUpiReference) {
+          return res.status(400).json({ message: "Incomplete Razorpay payment details" });
+        }
+        try {
+          verifiedRazorpayPayment = await fetchVerifiedRazorpayPayment(
+            input.razorpayOrderId,
+            requestUpiReference,
+          );
+        } catch (paymentErr) {
+          console.error("[Razorpay] Payment verification lookup failed:", paymentErr);
+          return res.status(502).json({ message: "Could not verify Razorpay payment" });
+        }
+        if (!verifiedRazorpayPayment) {
+          return res.status(400).json({ message: "Razorpay payment is not captured" });
+        }
+      }
+      const runPrePaymentGuards = shouldValidatePrePaymentGuards(!!verifiedRazorpayPayment);
 
       // Preorder dates are product eligibility metadata, not a client-trusted
       // calendar choice. Re-read the current products and validate the one
       // shared delivery date before any payment or inventory mutation.
-      if (input.orderType === "preorder") {
+      if (input.orderType === "preorder" && runPrePaymentGuards) {
         const dateText = input.deliveryDate;
         if (!dateText || !/^\d{4}-\d{2}-\d{2}$/.test(dateText)) {
           return res.status(400).json({ message: "Please choose a valid preorder delivery date." });
@@ -1119,22 +1432,9 @@ export async function registerRoutes(
           if (!input.razorpayOrderId) {
             return res.status(400).json({ message: "Razorpay order ID is required" });
           }
-          let verifiedPayment: {
-            id: string;
-            orderId: string;
-            amount: number;
-          } | null;
-          try {
-            verifiedPayment = await fetchVerifiedRazorpayPayment(
-              input.razorpayOrderId,
-              upiReference,
-            );
-          } catch (paymentErr) {
-            console.error("[Razorpay] Duplicate payment verification lookup failed:", paymentErr);
-            return res.status(502).json({ message: "Could not verify Razorpay payment" });
-          }
+          const verifiedPayment = verifiedRazorpayPayment;
           if (!verifiedPayment) {
-            return res.status(400).json({ message: "Razorpay payment is not successful" });
+            return res.status(400).json({ message: "Razorpay payment is not captured" });
           }
 
           if (isFtwStorefrontOrder(existing)) {
@@ -1167,7 +1467,7 @@ export async function registerRoutes(
       // Validate the selected slot against the requested calendar date on the
       // server as well as in the checkout UI. This prevents a stale tab or a
       // handcrafted request from ordering on a weekday that the admin disabled.
-      if (input.timeslotId && input.hubDbName && input.scheduleType !== "instant") {
+      if (runPrePaymentGuards && input.timeslotId && input.hubDbName && input.scheduleType !== "instant") {
         try {
           const slotError = await validateTimeslotBeforeCheckout({
             hubDbName: input.hubDbName,
@@ -1183,7 +1483,7 @@ export async function registerRoutes(
       }
 
       // ── Pre-flight: coupon usage check (runs BEFORE inventory is touched) ───
-      if (input.hubDbName && input.couponCode) {
+      if (runPrePaymentGuards && input.hubDbName && input.couponCode) {
         try {
           const hub = await getHubModels(input.hubDbName);
           const code = String(input.couponCode).trim().toUpperCase();
@@ -1218,10 +1518,21 @@ export async function registerRoutes(
 
       // FIFO inventory deduction if hubDbName is provided (atomic per-batch to prevent overselling)
       if (input.hubDbName && !isPaidWebhookRecovery) {
-        const hub = await getHubModels(input.hubDbName);
+        inventoryHub = await getHubModels(input.hubDbName);
+        const stockResult = await validateCheckoutStock(inventoryHub, input.items);
+        if (!stockResult.inStock) {
+          const names = stockResult.unavailableItems.map((item: any) => item.name).join(", ");
+          return res.status(409).json({
+            code: "STOCK_UNAVAILABLE",
+            message: names
+              ? `${names} ${stockResult.unavailableItems.length === 1 ? "is" : "are"} no longer available in the requested quantity.`
+              : "One or more items are no longer available in the requested quantity.",
+          });
+        }
+        const batchProductsWithDeduction = new Set<string>();
         for (const item of input.items) {
           // Always fetch the LATEST quantity from DB right before deducting
-          const product = await hub.Product.findById(item.productId).lean() as any;
+          const product = await inventoryHub.Product.findById(item.productId).lean() as any;
           if (!product) continue;
 
           const hasBatches = Array.isArray(product.inventoryBatches) && product.inventoryBatches.length > 0;
@@ -1230,20 +1541,26 @@ export async function registerRoutes(
             // ── No inventory batches: atomically decrement the top-level quantity field.
             // The $gte guard ensures we can NEVER deduct more than what actually exists,
             // even when two orders arrive simultaneously.
-            const atomicResult = await hub.Product.findOneAndUpdate(
+            const atomicResult = await inventoryHub.Product.findOneAndUpdate(
               { _id: item.productId, quantity: { $gte: item.quantity } },
               { $inc: { quantity: -item.quantity }, $set: { updatedAt: new Date() } }
             );
             if (!atomicResult) {
               // Re-read to give an accurate "how many are left" message
-              const fresh = await hub.Product.findById(item.productId).select("name quantity").lean() as any;
+              const fresh = await inventoryHub.Product.findById(item.productId).select("name quantity").lean() as any;
               const left = fresh?.quantity ?? 0;
               return res.status(409).json({
+                code: "STOCK_UNAVAILABLE",
                 message: left > 0
                   ? `"${product.name}" has only ${left} unit(s) available. Please update your cart.`
                   : `"${product.name}" just went out of stock. Please refresh and try again.`,
               });
             }
+            inventoryDeductionJournal.push({
+              mode: "quantity",
+              productId: String(item.productId),
+              quantity: item.quantity,
+            });
             continue;
           }
 
@@ -1263,6 +1580,7 @@ export async function registerRoutes(
           );
           if (totalAvailable < item.quantity) {
             return res.status(409).json({
+              code: "STOCK_UNAVAILABLE",
               message: `"${product.name}" has only ${totalAvailable} unit(s) available. Please update your cart.`,
             });
           }
@@ -1281,7 +1599,7 @@ export async function registerRoutes(
             let deduct = Math.min(batch.quantity, remaining);
             let deducted = false;
             for (let attempt = 0; attempt < 5; attempt++) {
-              const atomicResult = await hub.Product.findOneAndUpdate(
+              const atomicResult = await inventoryHub.Product.findOneAndUpdate(
                 {
                   _id: item.productId,
                   inventoryBatches: { $elemMatch: { _id: batch._id, quantity: { $gte: deduct } } },
@@ -1291,7 +1609,7 @@ export async function registerRoutes(
               if (atomicResult) { deducted = true; break; }
 
               // Re-read this batch's actual current quantity and retry with what's left
-              const freshDoc = await hub.Product.findOne(
+              const freshDoc = await inventoryHub.Product.findOne(
                 { _id: item.productId, "inventoryBatches._id": batch._id },
                 { "inventoryBatches.$": 1 }
               ).lean() as any;
@@ -1306,28 +1624,27 @@ export async function registerRoutes(
               continue;
             }
 
+            inventoryDeductionJournal.push({
+              mode: "batch",
+              productId: String(item.productId),
+              batchId: batch._id,
+              quantity: deduct,
+            });
             remaining -= deduct;
           }
 
           // If batches were exhausted before filling the full quantity, reject the order
           if (remaining > 0) {
             return res.status(409).json({
+              code: "STOCK_UNAVAILABLE",
               message: `"${product.name}" just went out of stock. Please refresh and try again.`,
             });
           }
-
-          // Remove zero-quantity batches atomically ($pull is safe for concurrent writes)
-          // then recalculate the denormalised top-level quantity field.
-          await hub.Product.findByIdAndUpdate(item.productId, {
-            $pull: { inventoryBatches: { quantity: { $lte: 0 } } },
-            $set: { updatedAt: new Date() },
-          });
-          const afterDeduct = await hub.Product.findById(item.productId).lean() as any;
-          const totalQty = (afterDeduct?.inventoryBatches ?? []).reduce(
-            (sum: number, b: any) => sum + b.quantity, 0
-          );
-          await hub.Product.findByIdAndUpdate(item.productId, { $set: { quantity: totalQty } });
+          batchProductsWithDeduction.add(String(item.productId));
         }
+        // Zero-batch cleanup is deferred until after order persistence so an
+        // aborted checkout can safely restore its exact deductions.
+        (req as any).inventoryBatchProductIds = [...batchProductsWithDeduction];
       }
 
       // Resolve coupon details and hub identity before persisting
@@ -1403,7 +1720,7 @@ export async function registerRoutes(
       // that value, only falling back to the client-submitted figure if lookup is impossible
       // (e.g. pickup/takeaway orders with no hub, or a legacy pincode not in the config yet).
       let slotCharge = clientSlotCharge;
-      if (input.hubDbName && (input.deliveryType ?? "delivery") === "delivery") {
+      if (!verifiedRazorpayPayment && input.hubDbName && (input.deliveryType ?? "delivery") === "delivery") {
         try {
           const pincode = input.deliveryAddressDetail?.pincode;
           const subHubForCharge = await SubHubModel.findOne({ dbName: input.hubDbName }).lean() as any;
@@ -1468,32 +1785,6 @@ export async function registerRoutes(
       // without digging into the payments array.
       const upiTransactionId =
         (input.payments ?? []).find((p: any) => p.mode === "upi" && p.reference)?.reference ?? null;
-
-      // Never trust client-provided paymentStatus/paidAmount. A Razorpay
-      // reference is paid only after the server confirms the payment belongs
-      // to this Razorpay order and has a successful status.
-      let verifiedRazorpayPayment: {
-        id: string;
-        orderId: string;
-        amount: number;
-      } | null = null;
-      if (input.razorpayOrderId || upiTransactionId) {
-        if (!input.razorpayOrderId || !upiTransactionId) {
-          return res.status(400).json({ message: "Incomplete Razorpay payment details" });
-        }
-        try {
-          verifiedRazorpayPayment = await fetchVerifiedRazorpayPayment(
-            input.razorpayOrderId,
-            upiTransactionId,
-          );
-        } catch (paymentErr) {
-          console.error("[Razorpay] Payment verification lookup failed:", paymentErr);
-          return res.status(502).json({ message: "Could not verify Razorpay payment" });
-        }
-        if (!verifiedRazorpayPayment) {
-          return res.status(400).json({ message: "Razorpay payment is not successful" });
-        }
-      }
 
       // Today's date for deliveryDate fallback
       const now2 = new Date();
@@ -1583,6 +1874,8 @@ export async function registerRoutes(
         couponCodes,
         coupons,
         ...paymentState,
+        inventoryDeducted: inventoryDeductionJournal.length > 0,
+        inventoryReviewRequired: isPaidWebhookRecovery,
          orderType: input.orderType ?? null,
         scheduleType: input.scheduleType ?? "slot",
         deliveryDate,
@@ -1594,6 +1887,22 @@ export async function registerRoutes(
       };
 
       const order = await storage.createOrderRequest(orderInput);
+      inventoryCommitted = true;
+      for (const productId of ((req as any).inventoryBatchProductIds ?? []) as string[]) {
+        try {
+          await inventoryHub.Product.findByIdAndUpdate(productId, {
+            $pull: { inventoryBatches: { quantity: { $lte: 0 } } },
+            $set: { updatedAt: new Date() },
+          });
+          const afterDeduct = await inventoryHub.Product.findById(productId).lean() as any;
+          const totalQty = (afterDeduct?.inventoryBatches ?? []).reduce(
+            (sum: number, batch: any) => sum + Number(batch.quantity ?? 0), 0,
+          );
+          await inventoryHub.Product.findByIdAndUpdate(productId, { $set: { quantity: totalQty } });
+        } catch (inventorySyncErr) {
+          console.error(`[Inventory] Batch cleanup/sync failed for product ${productId}:`, inventorySyncErr);
+        }
+      }
 
       // Generate orderId AFTER the document is saved — countDocuments gives the correct
       // shared sequence across admin + online orders, and $set appends orderId as the
@@ -1602,7 +1911,11 @@ export async function registerRoutes(
       // orderId and inventoryDeducted are set together in one update AFTER save,
       // so both appear after createdAt/updatedAt — matching admin POS field order exactly.
       await getOrderModel().findByIdAndUpdate(order.id, {
-        $set: { orderId: generatedOrderId, inventoryDeducted: false },
+        $set: {
+          orderId: generatedOrderId,
+          inventoryDeducted: inventoryDeductionJournal.length > 0,
+          inventoryReviewRequired: isPaidWebhookRecovery,
+        },
       });
 
       const orderItemsTotal = (order.items as any[]).reduce((sum: number, item: any) => {
@@ -1701,7 +2014,10 @@ export async function registerRoutes(
       if (err instanceof z.ZodError) {
         return res.status(400).json({ message: err.errors[0].message, field: err.errors[0].path.join('.') });
       }
+      console.error("[orders.create] Order creation failed:", err);
       res.status(500).json({ message: "Internal server error" });
+    } finally {
+      await rollbackInventoryDeductions();
     }
   });
 

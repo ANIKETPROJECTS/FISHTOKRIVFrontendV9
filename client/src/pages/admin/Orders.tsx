@@ -43,8 +43,9 @@ export default function Orders() {
           <TableBody>
             {sortedOrders.map((order) => {
               const items = order.items as any[];
-              const total = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+              const total = Number(order.total ?? items.reduce((sum, item) => sum + (item.price * item.quantity), 0));
               const statusConfig = STATUSES.find(s => s.value === order.status) || STATUSES[0];
+              const inventoryReviewRequired = Boolean((order as any).inventoryReviewRequired);
 
               return (
                 <TableRow key={order.id} className="group">
@@ -55,6 +56,14 @@ export default function Orders() {
                     <div className="font-medium">{order.customerName}</div>
                     <div className="text-xs text-muted-foreground">{order.phone}</div>
                     {order.orderId && <div className="text-xs font-mono text-primary mt-0.5">{order.orderId}</div>}
+                    {order.paymentStatus === "paid" && (
+                      <div className="text-xs font-medium text-emerald-700 mt-1">Paid online</div>
+                    )}
+                    {inventoryReviewRequired && (
+                      <div className="text-xs font-medium text-amber-700 mt-1">
+                        Inventory review required
+                      </div>
+                    )}
                   </TableCell>
                   <TableCell>
                     <div className="font-medium">{order.deliveryArea}</div>

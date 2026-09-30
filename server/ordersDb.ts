@@ -73,6 +73,7 @@ const orderSchema = new mongoose.Schema(
     timeslotStart: { type: String, default: null },
     timeslotEnd: { type: String, default: null },
     inventoryDeducted: { type: Boolean, default: false },
+    inventoryReviewRequired: { type: Boolean, default: false },
     upiTransactionId: { type: String, default: null },
     razorpayOrderId: { type: String, default: null },
     createdAt: { type: Date, default: Date.now },
@@ -80,6 +81,15 @@ const orderSchema = new mongoose.Schema(
     orderId: { type: String },
   },
   { versionKey: false }
+);
+
+orderSchema.index(
+  { razorpayOrderId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { razorpayOrderId: { $type: "string" } },
+    name: "uniq_razorpay_order_id",
+  },
 );
 
 export async function connectOrdersDb() {
@@ -109,10 +119,21 @@ const pendingCheckoutSchema = new mongoose.Schema(
   {
     razorpayOrderId: { type: String, required: true, unique: true, index: true },
     orderPayload: { type: mongoose.Schema.Types.Mixed, required: true },
+    amountPaise: { type: Number, default: null },
+    currency: { type: String, default: "INR" },
+    finalizationStatus: { type: String, default: "pending" },
+    autoRecoveryEligible: { type: Boolean, default: false },
+    finalizationAttempts: { type: Number, default: 0 },
+    finalizationLockAt: { type: Date, default: null },
+    finalizedOrderId: { type: String, default: null },
+    lastFinalizationError: { type: String, default: null },
+    lastAttemptAt: { type: Date, default: null },
+    reconciliationCheckedAt: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now, expires: 86400 }, // 24h TTL
   },
   { versionKey: false }
 );
+pendingCheckoutSchema.index({ finalizationStatus: 1, lastAttemptAt: 1 });
 
 export function getPendingCheckoutModel() {
   if (!ordersConnection) {

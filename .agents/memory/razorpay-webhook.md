@@ -1,44 +1,38 @@
 ---
-name: Razorpay webhook safety net
-description: How the payment.captured webhook recovers orders lost when the browser closes after payment but before the client handler fires.
+name: Razorpay payment finalization
+description: Safe browser, webhook, and reconciliation recovery for captured Razorpay checkouts.
 ---
 
-## The problem
-Client-side Razorpay handler (`options.handler`) calls `/api/orders` to create the FishTokri order. If the browser closes after Razorpay captures the payment but before that call completes, money is taken but no order is created.
+## Payment invariant
 
-## The fix (implemented)
+Only a server-verified Razorpay payment with `status: "captured"` counts as paid. Confirm the payment belongs to the submitted Razorpay order and that its captured amount/currency match the persisted checkout before creating or repairing an order. `authorized` is not captured.
 
-The storefront must treat a verified successful Razorpay result as the only authority for FTW payment state. Delivery date, schedule type, and timeslot do not affect this decision.
+## Recovery and idempotency
 
-### Pending checkout store
-- When `/api/razorpay/create-order` is called, the server saves the full pre-payment order payload (everything except `razorpayPaymentId`) to a `PendingCheckout` MongoDB collection on the `orders` DB.
-- TTL: 24 hours (matches Razorpay's webhook retry window).
-- Keyed by `razorpayOrderId` (the Razorpay `order_id`).
+- Persist the complete checkout payload and expected Razorpay amount before returning the payment order to the browser. Fail closed if that recovery record cannot be saved.
+- Browser callbacks, signed `payment.captured` webhooks, and production reconciliation must use the same finalizer.
+- Serialize finalization with a database lease. Look up by Razorpay order/payment reference first and repair an existing FTW order instead of creating another.
+- The pending-checkout record has a 24-hour TTL, aligned with Razorpay's webhook retry window. The production reconciliation loop retries eligible captured payments after missed callbacks/webhooks.
+- Client retries may repeat finalization safely; the Razorpay order ID is unique on storefront orders.
 
-### Webhook endpoint
-`POST /api/webhooks/razorpay`
-- Verifies `X-Razorpay-Signature` header via HMAC-SHA256 using `RAZORPAY_WEBHOOK_SECRET` and `req.rawBody` (captured by `express.json`'s verify callback in `server/index.ts`).
-- Handles `payment.captured` event only; all others return 200 immediately.
-- Idempotency: checks `OrderModel` for existing `razorpayOrderId` or `payments.reference` before proceeding; an existing FTW document is repaired rather than returned with stale unpaid metadata.
-- Fetches `PendingCheckout` by `razorpayOrderId`, merges actual payment details, then calls `http://localhost:${PORT}/api/orders` internally — reuses all inventory deduction, coupon, and WhatsApp logic.
-- Always returns 200 to prevent Razorpay retries on non-transient errors.
+## Inventory and payment recovery
 
-### Order schema
-`razorpayOrderId` field added to `orderSchema` in `server/ordersDb.ts` and to `insertOrderRequestSchema` / `InsertOrderRequest` in `shared/schema.ts`.
+Normal order creation deducts hub inventory atomically and journals each deduction so it can be rolled back if persistence fails. A captured payment must not be discarded because stock became unavailable after checkout: persist the paid storefront order without a stock deduction and flag it for Admin inventory review.
 
-### Payment invariant
-- The server confirms the Razorpay payment ID belongs to the submitted Razorpay order and has a successful status before creating or repairing an order.
-- Verified FTW + Razorpay state uses `paymentStatus: "paid"`, `dueAmount: 0`, `upiVariant: "RZPAY"`, the canonical `upiTransactionId`, and one idempotent UPI payment entry.
-- Callback retries replace the existing UPI entry rather than appending duplicates.
+**Why:** Payment capture is irreversible from the storefront's perspective, while inventory can change between checkout and webhook delivery. Silently rejecting the paid order loses fulfillment visibility; deducting unavailable stock is also incorrect.
 
-### Client changes (`CartDrawer.tsx`)
-- Calls `buildOrderPayload(selected)` (no paymentId) before the Razorpay modal, sends result as `orderPayload` alongside `amount` to `/api/razorpay/create-order`.
-- Both `createOrder` call sites (modal handler + UPI-resume visibilitychange) now spread `razorpayOrderId: order_id` (or `razorpayOrderId: orderId`) into the payload for deduplication.
+**How to apply:** Keep payment finalization independent of mutable slot, preorder, coupon-use, and delivery-charge checks. Preserve normal inventory checks for unpaid orders; use the explicit review state only for verified paid recovery.
 
-## Setup required
-1. Razorpay Dashboard → Settings → Webhooks → add URL: `https://<domain>/api/webhooks/razorpay`
-2. Select event: `payment.captured`
-3. Copy webhook secret → set as `RAZORPAY_WEBHOOK_SECRET` env var.
+## Historical checkout safety
 
-**Why:**
-Without this, any browser/network interruption after payment success silently loses the order. Razorpay retries webhooks for 24 hours, so a server restart during that window will still recover the order.
+Only pending checkouts explicitly marked eligible by the new checkout flow may be auto-reconciled. Legacy records without that marker require manual review, even when Razorpay confirms capture. Existing FTW orders may be repaired, but an absent order must not be auto-created for a legacy record.
+
+**Why:** A historical captured checkout was followed by a manual FTS order for the same basket and amount. Automatic backfill could cause duplicate fulfillment.
+
+**How to apply:** Before any production backfill of a legacy payment, inspect Admin orders for a manual replacement and get operator confirmation. Do not mutate production order data during code verification.
+
+## Webhook setup
+
+`POST /api/webhooks/razorpay` verifies `X-Razorpay-Signature` with `RAZORPAY_WEBHOOK_SECRET` and the raw request body, and processes only `payment.captured`. Return retryable 5xx responses for transient finalization failures; acknowledge unrelated events and manual-review cases.
+
+In Razorpay Dashboard → Settings → Webhooks, configure the published URL ending in `/api/webhooks/razorpay`, select `payment.captured`, and store the webhook secret in Replit Secrets.
