@@ -15,13 +15,13 @@ Only a server-verified Razorpay payment with `status: "captured"` counts as paid
 - The pending-checkout record has a 24-hour TTL, aligned with Razorpay's webhook retry window. The production reconciliation loop retries eligible captured payments after missed callbacks/webhooks.
 - Client retries may repeat finalization safely; the Razorpay order ID is unique on storefront orders.
 
-## Inventory and payment recovery
+## Inventory ownership and payment recovery
 
-Normal order creation deducts hub inventory atomically and journals each deduction so it can be rolled back if persistence fails. A captured payment must not be discarded because stock became unavailable after checkout: persist the paid storefront order without a stock deduction and flag it for Admin inventory review.
+The Admin panel owns inventory deduction for every storefront order. Storefront order creation must validate stock where safe, never decrement hub stock, and always save `inventoryDeducted: false`. If stock changes after Razorpay capture, persist the paid order and set `inventoryReviewRequired` so Admin can resolve it.
 
-**Why:** Payment capture is irreversible from the storefront's perspective, while inventory can change between checkout and webhook delivery. Silently rejecting the paid order loses fulfillment visibility; deducting unavailable stock is also incorrect.
+**Why:** Deducting in both the storefront and Admin can reduce stock twice. A captured payment is irreversible from the storefront's perspective, so a late stock shortage must remain visible as an order for Admin review.
 
-**How to apply:** Keep payment finalization independent of mutable slot, preorder, coupon-use, and delivery-charge checks. Preserve normal inventory checks for unpaid orders; use the explicit review state only for verified paid recovery.
+**How to apply:** Keep stock checks before payment and for unpaid order creation. Never reject an already captured payment solely because stock changed afterward; persist it for Admin review without changing inventory.
 
 ## Historical checkout safety
 

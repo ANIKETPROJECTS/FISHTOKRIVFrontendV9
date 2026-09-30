@@ -1298,7 +1298,7 @@ export async function registerRoutes(
 
       // Preorder dates are product eligibility metadata, not a client-trusted
       // calendar choice. Re-read the current products and validate the one
-      // shared delivery date before any payment or inventory mutation.
+      // shared delivery date before payment capture or order persistence.
       if (input.orderType === "preorder" && runPrePaymentGuards) {
         const dateText = input.deliveryDate;
         if (!dateText || !/^\d{4}-\d{2}-\d{2}$/.test(dateText)) {

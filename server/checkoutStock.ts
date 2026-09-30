@@ -25,8 +25,9 @@ export function getCheckoutAvailableQuantity(
     ? product.inventoryBatches
     : [];
 
-  // Order creation deducts from inventoryBatches when present, otherwise from
-  // the top-level quantity. Do not count the separate POS `batches` field here.
+  // The Admin panel owns inventory deduction. Storefront validation reads
+  // inventoryBatches when present, otherwise top-level quantity. Do not count
+  // the separate POS `batches` field here.
   if (batches.length === 0) {
     const quantity = Number(product.quantity ?? 0);
     return Number.isFinite(quantity) ? Math.max(0, quantity) : 0;
