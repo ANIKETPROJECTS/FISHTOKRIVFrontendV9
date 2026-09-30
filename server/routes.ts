@@ -1255,41 +1255,6 @@ export async function registerRoutes(
 
   // Orders routes
   app.post(api.orders.create.path, async (req, res) => {
-    const inventoryDeductionJournal: Array<{
-      mode: "quantity" | "batch";
-      productId: string;
-      batchId?: any;
-      quantity: number;
-    }> = [];
-    let inventoryHub: any = null;
-    let inventoryCommitted = false;
-    const rollbackInventoryDeductions = async () => {
-      if (inventoryCommitted || !inventoryHub || inventoryDeductionJournal.length === 0) return;
-      for (const deduction of [...inventoryDeductionJournal].reverse()) {
-        try {
-          if (deduction.mode === "quantity") {
-            await inventoryHub.Product.findByIdAndUpdate(deduction.productId, {
-              $inc: { quantity: deduction.quantity },
-              $set: { updatedAt: new Date() },
-            });
-          } else {
-            const restored = await inventoryHub.Product.findOneAndUpdate(
-              { _id: deduction.productId, "inventoryBatches._id": deduction.batchId },
-              {
-                $inc: { "inventoryBatches.$.quantity": deduction.quantity },
-                $set: { updatedAt: new Date() },
-              },
-            );
-            if (!restored) {
-              console.error(`[Inventory] Could not roll back a batch deduction for product ${deduction.productId}`);
-            }
-          }
-        } catch (rollbackErr) {
-          console.error("[Inventory] Deduction rollback failed:", rollbackErr);
-        }
-      }
-      inventoryDeductionJournal.length = 0;
-    };
     try {
       const input = api.orders.create.input.parse(req.body);
       const localAddress = req.socket.remoteAddress ?? "";
@@ -1311,6 +1276,7 @@ export async function registerRoutes(
       }
 
       let verifiedRazorpayPayment: Awaited<ReturnType<typeof fetchVerifiedRazorpayPayment>> | null = null;
+      let inventoryReviewRequired = isPaidWebhookRecovery;
       if (input.razorpayOrderId || requestUpiReference) {
         if (!input.razorpayOrderId || !requestUpiReference) {
           return res.status(400).json({ message: "Incomplete Razorpay payment details" });
@@ -1515,135 +1481,29 @@ export async function registerRoutes(
         }
       }
 
-      // FIFO inventory deduction if hubDbName is provided (atomic per-batch to prevent overselling)
+      // The Admin panel owns inventory deduction. Validate current stock here,
+      // but never decrement quantity or batches while punching a storefront order.
       if (input.hubDbName && !isPaidWebhookRecovery) {
-        inventoryHub = await getHubModels(input.hubDbName);
+        const inventoryHub = await getHubModels(input.hubDbName);
         const stockResult = await validateCheckoutStock(inventoryHub, input.items);
         if (!stockResult.inStock) {
-          const names = stockResult.unavailableItems.map((item: any) => item.name).join(", ");
-          return res.status(409).json({
-            code: "STOCK_UNAVAILABLE",
-            message: names
-              ? `${names} ${stockResult.unavailableItems.length === 1 ? "is" : "are"} no longer available in the requested quantity.`
-              : "One or more items are no longer available in the requested quantity.",
-          });
-        }
-        const batchProductsWithDeduction = new Set<string>();
-        for (const item of input.items) {
-          // Always fetch the LATEST quantity from DB right before deducting
-          const product = await inventoryHub.Product.findById(item.productId).lean() as any;
-          if (!product) continue;
-
-          const hasBatches = Array.isArray(product.inventoryBatches) && product.inventoryBatches.length > 0;
-
-          if (!hasBatches) {
-            // ── No inventory batches: atomically decrement the top-level quantity field.
-            // The $gte guard ensures we can NEVER deduct more than what actually exists,
-            // even when two orders arrive simultaneously.
-            const atomicResult = await inventoryHub.Product.findOneAndUpdate(
-              { _id: item.productId, quantity: { $gte: item.quantity } },
-              { $inc: { quantity: -item.quantity }, $set: { updatedAt: new Date() } }
+          if (verifiedRazorpayPayment) {
+            // Payment is already captured: retain the order for Admin to review
+            // and perform the inventory deduction rather than discarding a paid order.
+            inventoryReviewRequired = true;
+            console.warn(
+              "[Inventory] Persisting captured Razorpay order for Admin review; stock changed before order save.",
             );
-            if (!atomicResult) {
-              // Re-read to give an accurate "how many are left" message
-              const fresh = await inventoryHub.Product.findById(item.productId).select("name quantity").lean() as any;
-              const left = fresh?.quantity ?? 0;
-              return res.status(409).json({
-                code: "STOCK_UNAVAILABLE",
-                message: left > 0
-                  ? `"${product.name}" has only ${left} unit(s) available. Please update your cart.`
-                  : `"${product.name}" just went out of stock. Please refresh and try again.`,
-              });
-            }
-            inventoryDeductionJournal.push({
-              mode: "quantity",
-              productId: String(item.productId),
-              quantity: item.quantity,
-            });
-            continue;
-          }
-
-          // ── Batch-based path (FIFO) ────────────────────────────────────────────
-          const now = new Date();
-          const activeBatches = (product.inventoryBatches as any[]).filter((batch: any) => {
-            const expiryDate = batch.expiryDate
-              ? new Date(batch.expiryDate)
-              : computeExpiryDate(new Date(batch.entryDate), batch.shelfLifeDays);
-            return batch.remainingTime !== "expired" && expiryDate > now;
-          });
-
-          // Pre-flight stock check against current DB state (non-blocking optimisation;
-          // the real guard is the atomic $gte on each batch below)
-          const totalAvailable = activeBatches.reduce(
-            (sum: number, b: any) => sum + b.quantity, 0
-          );
-          if (totalAvailable < item.quantity) {
+          } else {
+            const names = stockResult.unavailableItems.map((item: any) => item.name).join(", ");
             return res.status(409).json({
               code: "STOCK_UNAVAILABLE",
-              message: `"${product.name}" has only ${totalAvailable} unit(s) available. Please update your cart.`,
+              message: names
+                ? `${names} ${stockResult.unavailableItems.length === 1 ? "is" : "are"} no longer available in the requested quantity.`
+                : "One or more items are no longer available in the requested quantity.",
             });
           }
-
-          // Sort batches by entryDate ascending (oldest first = FIFO)
-          const sortedBatches = [...activeBatches].sort(
-            (a: any, b: any) => new Date(a.entryDate).getTime() - new Date(b.entryDate).getTime()
-          );
-
-          let remaining = item.quantity;
-          for (const batch of sortedBatches) {
-            if (remaining <= 0) break;
-            // Atomically deduct only if this batch still has at least `deduct` units.
-            // If a concurrent order has taken some (but not all) stock from this batch,
-            // we re-read the current quantity and retry with the lesser amount (up to 5 times).
-            let deduct = Math.min(batch.quantity, remaining);
-            let deducted = false;
-            for (let attempt = 0; attempt < 5; attempt++) {
-              const atomicResult = await inventoryHub.Product.findOneAndUpdate(
-                {
-                  _id: item.productId,
-                  inventoryBatches: { $elemMatch: { _id: batch._id, quantity: { $gte: deduct } } },
-                },
-                { $inc: { "inventoryBatches.$.quantity": -deduct } }
-              );
-              if (atomicResult) { deducted = true; break; }
-
-              // Re-read this batch's actual current quantity and retry with what's left
-              const freshDoc = await inventoryHub.Product.findOne(
-                { _id: item.productId, "inventoryBatches._id": batch._id },
-                { "inventoryBatches.$": 1 }
-              ).lean() as any;
-              const currentQty = freshDoc?.inventoryBatches?.[0]?.quantity ?? 0;
-              if (currentQty <= 0) break; // batch fully exhausted by concurrent orders
-              deduct = Math.min(currentQty, remaining); // take whatever is still available
-            }
-
-            if (!deducted) {
-              // Could not deduct from this batch after retries — move to next batch
-              // (remaining will catch the shortfall after the batch loop)
-              continue;
-            }
-
-            inventoryDeductionJournal.push({
-              mode: "batch",
-              productId: String(item.productId),
-              batchId: batch._id,
-              quantity: deduct,
-            });
-            remaining -= deduct;
-          }
-
-          // If batches were exhausted before filling the full quantity, reject the order
-          if (remaining > 0) {
-            return res.status(409).json({
-              code: "STOCK_UNAVAILABLE",
-              message: `"${product.name}" just went out of stock. Please refresh and try again.`,
-            });
-          }
-          batchProductsWithDeduction.add(String(item.productId));
         }
-        // Zero-batch cleanup is deferred until after order persistence so an
-        // aborted checkout can safely restore its exact deductions.
-        (req as any).inventoryBatchProductIds = [...batchProductsWithDeduction];
       }
 
       // Resolve coupon details and hub identity before persisting
@@ -1873,8 +1733,8 @@ export async function registerRoutes(
         couponCodes,
         coupons,
         ...paymentState,
-        inventoryDeducted: inventoryDeductionJournal.length > 0,
-        inventoryReviewRequired: isPaidWebhookRecovery,
+        inventoryDeducted: false,
+        inventoryReviewRequired,
          orderType: input.orderType ?? null,
         scheduleType: input.scheduleType ?? "slot",
         deliveryDate,
@@ -1886,22 +1746,6 @@ export async function registerRoutes(
       };
 
       const order = await storage.createOrderRequest(orderInput);
-      inventoryCommitted = true;
-      for (const productId of ((req as any).inventoryBatchProductIds ?? []) as string[]) {
-        try {
-          await inventoryHub.Product.findByIdAndUpdate(productId, {
-            $pull: { inventoryBatches: { quantity: { $lte: 0 } } },
-            $set: { updatedAt: new Date() },
-          });
-          const afterDeduct = await inventoryHub.Product.findById(productId).lean() as any;
-          const totalQty = (afterDeduct?.inventoryBatches ?? []).reduce(
-            (sum: number, batch: any) => sum + Number(batch.quantity ?? 0), 0,
-          );
-          await inventoryHub.Product.findByIdAndUpdate(productId, { $set: { quantity: totalQty } });
-        } catch (inventorySyncErr) {
-          console.error(`[Inventory] Batch cleanup/sync failed for product ${productId}:`, inventorySyncErr);
-        }
-      }
 
       // Generate orderId AFTER the document is saved — countDocuments gives the correct
       // shared sequence across admin + online orders, and $set appends orderId as the
@@ -1912,8 +1756,8 @@ export async function registerRoutes(
       await getOrderModel().findByIdAndUpdate(order.id, {
         $set: {
           orderId: generatedOrderId,
-          inventoryDeducted: inventoryDeductionJournal.length > 0,
-          inventoryReviewRequired: isPaidWebhookRecovery,
+          inventoryDeducted: false,
+          inventoryReviewRequired,
         },
       });
 
@@ -2015,8 +1859,6 @@ export async function registerRoutes(
       }
       console.error("[orders.create] Order creation failed:", err);
       res.status(500).json({ message: "Internal server error" });
-    } finally {
-      await rollbackInventoryDeductions();
     }
   });
 
