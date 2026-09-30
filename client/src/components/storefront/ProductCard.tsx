@@ -31,7 +31,9 @@ export function ProductCard({ product, preorderContext = false }: { product: Pro
   const discountPct = hasDiscount ? Math.round((product.originalPrice! - product.price!) / product.originalPrice! * 100) : null;
   const strikePrice = hasDiscount ? product.originalPrice : null;
 
-  const maxQty = cartItem ? computeMaxQty(cartItem) : 999;
+  const maxQty = computeMaxQty(
+    (cartItem ?? { ...product, quantity: 0 }) as any,
+  );
 
   const handleAdd = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -132,8 +134,9 @@ export function ProductCard({ product, preorderContext = false }: { product: Pro
           ) : qty === 0 ? (
             <Button
               onClick={handleAdd}
+              disabled={maxQty <= 0}
               data-testid={`button-add-product-${product.id}`}
-              className="rounded-full w-9 h-9 p-0 text-white shadow-md flex items-center justify-center shrink-0 bg-primary hover:bg-[#F05B4E] transition-colors"
+              className="rounded-full w-9 h-9 p-0 text-white shadow-md flex items-center justify-center shrink-0 bg-primary hover:bg-[#F05B4E] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               size="icon"
             >
               <Plus className="w-5 h-5 text-white" />

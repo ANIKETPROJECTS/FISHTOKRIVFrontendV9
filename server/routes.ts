@@ -15,6 +15,7 @@ import { getHubModels } from "./hubConnections";
 import { CustomerDbModel } from "./customerDb";
 import { computeExpiryDate, computeRemainingTime } from "./inventorySync";
 import {
+  getCheckoutAvailableQuantity,
   findCheckoutStockIssues,
   type CheckoutStockLine,
 } from "./checkoutStock";
@@ -457,11 +458,9 @@ export async function registerRoutes(
     const batchExpired = hasAnyBatches && !hasActiveBatches;
     const effectiveStatus = batchExpired ? "unavailable" : doc.status;
 
-    // Available quantity: sum active batches from both systems; fall back to doc.quantity if no batches
-    const availableQty = hasAnyBatches
-      ? activeInvBatches.reduce((sum: number, b: any) => sum + (b.quantity ?? 0), 0)
-        + activeExtBatches.reduce((sum: number, b: any) => sum + (b.quantity ?? 0), 0)
-      : (doc.quantity != null ? doc.quantity : null);
+    // Match the same authoritative inventory source used by checkout. The
+    // separate POS `batches` field is not decremented by storefront orders.
+    const availableQty = getCheckoutAvailableQuantity(doc, now);
     return {
       id: doc._id.toString(), name: doc.name, category: doc.category,
       subCategory: doc.subCategory ?? null, status: effectiveStatus,

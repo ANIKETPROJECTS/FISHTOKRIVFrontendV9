@@ -9,6 +9,6 @@
 - [Environment precedence](env-precedence.md) — keep ecosystem defaults intact; runtime Replit Secrets override them in the launcher.
 - [Preorder date-specific slots](preorder-date-slots.md) — preorder checkout selects a future date and filters slots by configured active weekdays.
 - [Same-day slot cutoff](same-day-slot-cutoff.md) — enforce the 30-minute cutoff server-side in India time; stale carts can submit after the UI hides a slot.
-- [Cross-channel inventory mismatch](inventory-channel-mismatch.md) — FTS and FTW must share one atomic stock field; external batches and storefront inventoryBatches are not interchangeable.
+- [Cross-channel inventory mismatch](inventory-channel-mismatch.md) — storefront caps must match checkout stock; external POS batches cannot be added to storefront inventory without an atomic shared decrement.
 - [Production logging and polling](production-logging-and-polling.md) — production API logs stay concise; live catalog refresh is explicit rather than global.
 - [Keep checkout helpers isolated](checkout-helper-imports.md) — stock calculations used by tests should not import DB-connected sync modules.

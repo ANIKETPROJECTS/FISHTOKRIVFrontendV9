@@ -206,13 +206,13 @@ export default function Home() {
                   const comboCartId = -Math.abs(parseInt(combo.id.slice(-6), 16) || 9999);
                   const comboCartItem = cartItems.find(i => i.id === comboCartId);
                   const comboQty = comboCartItem?.quantity ?? 0;
-                  const comboMaxQty = comboCartItem ? computeMaxQty(comboCartItem) : 999;
                   const buildComboPayload = () => {
                     const comboCategories = combo.includes.slice(0, 3).map(inc => productMap[inc.productId]?.category ?? "Fish");
                     const qtysWithLimits = combo.includes.map(inc => productMap[inc.productId]?.availableQty).filter((q): q is number => q != null);
                     const comboAvailableQty = qtysWithLimits.length > 0 ? Math.min(...qtysWithLimits) : null;
                     return { id: comboCartId, originalId: combo.id, name: combo.name, price: combo.discountedPrice, category: "Combo", status: "available", unit: combo.weight, imageUrl: combo.imageUrl ?? null, isArchived: false, updatedAt: new Date(), limitedStockNote: null, sectionId: null, isCombo: true, comboImages, comboCategories, availableQty: comboAvailableQty, comboIncludes: combo.includes.map(inc => ({ productId: inc.productId, quantity: inc.quantity ?? 1, availableQty: productMap[inc.productId]?.availableQty ?? null })) } as any;
                   };
+                  const comboMaxQty = computeMaxQty(comboCartItem ?? buildComboPayload());
                   return (
                     <div key={combo.id} className="group relative bg-card flex flex-col transition-all duration-300 cursor-pointer rounded-2xl overflow-hidden border border-border/20">
                       <Link href={`/combo/${combo.id}`}>
@@ -239,7 +239,7 @@ export default function Home() {
                             {showPct > 0 && <span className="text-sm font-semibold text-green-600">{showPct}% off</span>}
                           </div>
                           {comboQty === 0 ? (
-                            <Button onClick={(e) => { e.stopPropagation(); addToCart(buildComboPayload()); }} className="rounded-full w-9 h-9 p-0 text-white shadow-md flex items-center justify-center shrink-0 bg-primary hover:bg-[#F05B4E] transition-colors" size="icon">
+                           <Button onClick={(e) => { e.stopPropagation(); addToCart(buildComboPayload()); }} disabled={comboMaxQty <= 0} className="rounded-full w-9 h-9 p-0 text-white shadow-md flex items-center justify-center shrink-0 bg-primary hover:bg-[#F05B4E] transition-colors disabled:opacity-40" size="icon">
                               <Plus className="w-5 h-5 text-white" />
                             </Button>
                           ) : (
@@ -442,8 +442,6 @@ export default function Home() {
                                     const comboCartId = -Math.abs(parseInt(combo.id.slice(-6), 16) || 9999);
                                     const comboCartItem = cartItems.find(i => i.id === comboCartId);
                                     const comboQty = comboCartItem?.quantity ?? 0;
-                                    const comboMaxQty = comboCartItem ? computeMaxQty(comboCartItem) : 999;
-
                                     const buildComboPayload = () => {
                                       const comboCategories = combo.includes
                                         .slice(0, 3)
@@ -471,12 +469,14 @@ export default function Home() {
                                         })),
                                       } as any;
                                     };
+                                    const comboMaxQty = computeMaxQty(comboCartItem ?? buildComboPayload());
 
                                     if (comboQty === 0) {
                                       return (
                                         <Button
                                           onClick={(e) => { e.stopPropagation(); addToCart(buildComboPayload()); }}
-                                          className="rounded-full w-9 h-9 p-0 text-white shadow-md flex items-center justify-center shrink-0 bg-primary hover:bg-[#F05B4E] transition-colors"
+                                          disabled={comboMaxQty <= 0}
+                                          className="rounded-full w-9 h-9 p-0 text-white shadow-md flex items-center justify-center shrink-0 bg-primary hover:bg-[#F05B4E] transition-colors disabled:opacity-40"
                                           size="icon"
                                           data-testid={`button-add-combo-${combo.id}`}
                                         >

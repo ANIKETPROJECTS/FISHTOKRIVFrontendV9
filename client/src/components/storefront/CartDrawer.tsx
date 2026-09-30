@@ -314,11 +314,9 @@ export function CartDrawer() {
   const pendingSelectedAddressRef = useRef<any>(null);
   const razorpayInstanceRef = useRef<any>(null);
   const cartStockCheckInFlightRef = useRef(false);
-  const reportedStockIssueIdsRef = useRef<Set<number>>(new Set());
   const returningFromUpiRef = useRef(false);
   const openStockIssueDialog = (result: StockCheckResult) => {
     const rows = getCartStockIssueRows(items, result);
-    rows.forEach((row) => reportedStockIssueIdsRef.current.add(row.cartItemId));
     setCartStockWarnings(
       Object.fromEntries(rows.map((row) => [row.cartItemId, row.warning])),
     );
@@ -328,7 +326,6 @@ export function CartDrawer() {
   const removeStockIssueItems = () => {
     const itemIds = new Set(stockIssueRows.map((row) => row.cartItemId));
     itemIds.forEach((id) => removeFromCart(id));
-    itemIds.forEach((id) => reportedStockIssueIdsRef.current.delete(id));
     setCartStockWarnings((current) => {
       const next = { ...current };
       itemIds.forEach((id) => delete next[id]);
@@ -1317,7 +1314,6 @@ export function CartDrawer() {
   // is pending, including while the customer switches to an external UPI app.
   useEffect(() => {
     if (items.length === 0) {
-      reportedStockIssueIdsRef.current.clear();
       setCartStockWarnings((current) =>
         Object.keys(current).length === 0 ? current : {},
       );
@@ -1326,7 +1322,6 @@ export function CartDrawer() {
       return;
     }
     if (!isHubReady || !selectedSubHub?.dbName) {
-      reportedStockIssueIdsRef.current.clear();
       setCartStockWarnings((current) =>
         Object.keys(current).length === 0 ? current : {},
       );
@@ -1361,27 +1356,18 @@ export function CartDrawer() {
         ) return;
 
         const nextWarnings = getCartStockWarnings(items, result);
-        const nextIssueIds = new Set(Object.keys(nextWarnings).map(Number));
-        reportedStockIssueIdsRef.current.forEach((id) => {
-          if (!nextIssueIds.has(id)) reportedStockIssueIdsRef.current.delete(id);
-        });
-        const hasNewIssue = [...nextIssueIds].some(
-          (id) => !reportedStockIssueIdsRef.current.has(id),
+        // Background stock refreshes update inline warnings only. Reserve the
+        // blocking dialog for an explicit checkout attempt, so a shopper can
+        // adjust quantities without being interrupted by a popup.
+        setCartStockWarnings((current) =>
+          areStockWarningsEqual(current, nextWarnings) ? current : nextWarnings,
         );
-
-        if (hasNewIssue) {
-          openStockIssueDialog(result);
-        } else {
-          setCartStockWarnings((current) =>
-            areStockWarningsEqual(current, nextWarnings) ? current : nextWarnings,
-          );
-          if (isStockIssueDialogOpen) {
-            if (nextIssueIds.size > 0) {
-              setStockIssueRows(getCartStockIssueRows(items, result));
-            } else {
-              setStockIssueRows([]);
-              setIsStockIssueDialogOpen(false);
-            }
+        if (isStockIssueDialogOpen) {
+          if (Object.keys(nextWarnings).length > 0) {
+            setStockIssueRows(getCartStockIssueRows(items, result));
+          } else {
+            setStockIssueRows([]);
+            setIsStockIssueDialogOpen(false);
           }
         }
       } catch (error) {

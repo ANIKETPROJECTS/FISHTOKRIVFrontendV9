@@ -138,7 +138,7 @@ export default function ProductDetail() {
   const { toast } = useToast();
   const { data: products, isLoading } = useProducts();
   const search = useSearch();
-  const { addToCart, updateQuantity, appliedCoupon, setAppliedCoupon, items: cartItems } = useCart();
+  const { addToCart, updateQuantity, appliedCoupon, setAppliedCoupon, items: cartItems, computeMaxQty } = useCart();
   const { customer, openLoginModal } = useCustomer();
   const [qty, setQty] = useState(1);
   const recipeScrollRef = useRef<HTMLDivElement>(null);
@@ -164,15 +164,20 @@ export default function ProductDetail() {
   // Inventory cap — same logic as home screen and ComboDetail
   const cartItem = cartItems.find(i => (i.originalId ?? String(i.id)) === product?.id);
   const currentCartQty = cartItem?.quantity ?? 0;
-  const maxAddable = product?.availableQty != null
-    ? Math.max(0, product.availableQty - currentCartQty)
-    : 999;
+  const stockCandidate = cartItem ?? (product ? { ...product, quantity: 0 } as any : null);
+  const totalMax = stockCandidate ? computeMaxQty(stockCandidate) : 0;
   const [offersExpanded, setOffersExpanded] = useState(false);
 
   // Reset local qty when navigating to a different product
   useEffect(() => {
     setQty(1);
   }, [productId]);
+
+  useEffect(() => {
+    if (!cartItem) {
+      setQty((current) => Math.min(current, Math.max(1, totalMax)));
+    }
+  }, [cartItem, totalMax]);
 
   const { coupons: rawProductCoupons } = useProductCoupons(productId, product?.couponIds ?? []);
   const { data: userCouponUsage = {} } = useQuery<Record<string, { usedCount: number; limit: number; isExhausted: boolean; message: string }>>({
@@ -425,7 +430,6 @@ export default function ProductDetail() {
 
             {/* Qty + Add to Cart */}
             {(() => {
-              const totalMax = product.availableQty != null ? product.availableQty : 999;
               const isInCart = currentCartQty > 0;
               // When in cart, the displayed qty IS the cart qty (real-time synced).
               // When not in cart, use local qty state.

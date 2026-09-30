@@ -64,7 +64,6 @@ function ComboCard({ combo, productMap }: { combo: Combo; productMap: Record<str
   const comboCartId = -Math.abs(parseInt(combo.id.slice(-6), 16) || 9999);
   const comboCartItem = cartItems.find(i => i.id === comboCartId);
   const comboQty = comboCartItem?.quantity ?? 0;
-  const comboMaxQty = comboCartItem ? computeMaxQty(comboCartItem) : 999;
 
   const buildComboPayload = () => {
     const comboCategories = combo.includes.slice(0, 3).map(inc => productMap[inc.productId]?.category ?? "Fish");
@@ -83,6 +82,7 @@ function ComboCard({ combo, productMap }: { combo: Combo; productMap: Record<str
       })),
     } as any;
   };
+  const comboMaxQty = computeMaxQty(comboCartItem ?? buildComboPayload());
 
   return (
     <div className="group relative bg-card flex flex-col transition-all duration-300 cursor-pointer rounded-2xl overflow-hidden border border-border/20 shadow-sm">
@@ -121,7 +121,8 @@ function ComboCard({ combo, productMap }: { combo: Combo; productMap: Record<str
           {comboQty === 0 ? (
             <Button
               onClick={(e) => { e.stopPropagation(); addToCart(buildComboPayload()); }}
-              className="rounded-full w-9 h-9 p-0 text-white shadow-md flex items-center justify-center shrink-0 bg-primary hover:bg-[#F05B4E] transition-colors"
+              disabled={comboMaxQty <= 0}
+              className="rounded-full w-9 h-9 p-0 text-white shadow-md flex items-center justify-center shrink-0 bg-primary hover:bg-[#F05B4E] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               size="icon"
             >
               <Plus className="w-5 h-5 text-white" />

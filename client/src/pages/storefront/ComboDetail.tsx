@@ -18,7 +18,7 @@ import Lottie from "lottie-react";
 import recipesIconAnim from "@/assets/lottie/recipes-icon.json";
 import mayAlsoLikeAnim from "@/assets/lottie/may-also-like.json";
 import iconTimeImg from "@assets/time_1776949603776.png";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { SwipeHint } from "@/components/storefront/SwipeHint";
@@ -486,9 +486,15 @@ export default function ComboDetail() {
 
   const maxComboQty = comboCartItem ? computeMaxQty(comboCartItem) : 99;
 
+  useEffect(() => {
+    setQty((current) => Math.min(current, Math.max(1, maxComboQty)));
+  }, [maxComboQty]);
+
   const handleAddToCart = () => {
     if (!combo || !comboCartItem) return;
     if (!customer) { openLoginModal(); return; }
+    const quantityToAdd = Math.min(qty, maxComboQty);
+    if (quantityToAdd <= 0) return;
     const comboImagesForCart = includedProducts
       .slice(0, 3)
       .map(({ product }) => product?.imageUrl || getFallbackImage(product?.category ?? "Fish"));
@@ -501,7 +507,7 @@ export default function ComboDetail() {
         comboImages: comboImagesForCart,
         comboCategories: comboCategoriesForCart,
       } as any,
-      qty
+      quantityToAdd
     );
     setAdded(true);
     setTimeout(() => { setAdded(false); setIsCartOpen(true); }, 800);
@@ -694,8 +700,9 @@ export default function ComboDetail() {
               </div>
               <Button
                 onClick={handleAddToCart}
+                disabled={maxComboQty <= 0}
                 className={`flex-1 h-12 rounded-full font-bold text-base flex items-center justify-center gap-2 transition-all ${
-                  added ? "bg-emerald-500 hover:bg-emerald-500 text-white" : "bg-primary text-white shadow-lg shadow-primary/20"
+                  added ? "bg-emerald-500 hover:bg-emerald-500 text-white" : "bg-primary text-white shadow-lg shadow-primary/20 disabled:opacity-40 disabled:cursor-not-allowed"
                 }`}
                 data-testid="button-add-combo-to-cart"
               >
