@@ -103,14 +103,14 @@ export type UpdateProductRequest = Partial<InsertProduct> & { isArchived?: boole
 export type Section = {
   id: string;
   title: string;
-  type: "products" | "combos";
+  type: "products" | "combos" | "preorder";
   sortOrder: number;
   isActive: boolean;
 };
 
 export type InsertSection = {
   title: string;
-  type?: "products" | "combos";
+  type?: "products" | "combos" | "preorder";
   sortOrder?: number;
   isActive?: boolean;
 };
@@ -293,7 +293,7 @@ export const insertProductSchema = z.object({
 
 export const insertSectionSchema = z.object({
   title: z.string().min(1, "Title is required"),
-  type: z.enum(["products", "combos"]).optional(),
+  type: z.enum(["products", "combos", "preorder"]).optional(),
   sortOrder: z.number().optional(),
   isActive: z.boolean().optional(),
 });

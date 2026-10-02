@@ -144,6 +144,32 @@ export default function Home() {
     (p) => !p.isArchived && !p.batchExpired && isPreorderStorefrontProduct(p),
   );
 
+  const renderPreorderSection = (key: string, title: string) => {
+    if (preorderProducts.length === 0) return null;
+    return (
+      <section key={key} className="mb-7" data-testid="section-preorder">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h2 className="text-xl sm:text-2xl font-medium text-foreground uppercase tracking-wide">
+              {title}
+            </h2>
+            <p className="text-xs sm:text-sm text-muted-foreground mt-1">
+              Reserve these items for a future delivery date
+            </p>
+          </div>
+        </div>
+        <DragScrollDiv className="flex overflow-x-auto gap-4 sm:gap-6 scrollbar-hide">
+          {preorderProducts.map((product) => (
+            <div key={product.id} className="w-[240px] sm:w-[280px] flex-none">
+              <ProductCard product={product} preorderContext />
+            </div>
+          ))}
+        </DragScrollDiv>
+        <SwipeHint />
+      </section>
+    );
+  };
+
   const handleLogoClick = () => {
     setView("home");
     setSearchQuery("");
@@ -345,33 +371,17 @@ export default function Home() {
           <SwipeHint />
         </div>
 
-        {/* Preorder products are deliberately kept out of normal category
-            sections and get their own customer-facing section. */}
-        {preorderProducts.length > 0 && (
-          <section className="mb-7" data-testid="section-preorder">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="text-xl sm:text-2xl font-medium text-foreground uppercase tracking-wide">
-                  Preorder
-                </h2>
-                <p className="text-xs sm:text-sm text-muted-foreground mt-1">
-                  Reserve these items for a future delivery date
-                </p>
-              </div>
-            </div>
-            <DragScrollDiv className="flex overflow-x-auto gap-4 sm:gap-6 scrollbar-hide">
-              {preorderProducts.map((product) => (
-                <div key={product.id} className="w-[240px] sm:w-[280px] flex-none">
-                  <ProductCard product={product} preorderContext />
-                </div>
-              ))}
-            </DragScrollDiv>
-            <SwipeHint />
-          </section>
-        )}
+        {/* Preserve the existing preorder placement for hubs that have not
+            configured a ranked preorder section yet. */}
+        {!sections.some((section) => section.type === "preorder") &&
+          renderPreorderSection("preorder-default", "Preorder")}
 
-        {/* Dynamic Sections from DB — products and combos */}
+        {/* Dynamic Sections from DB — products, combos, and preorder */}
         {sections.map((section) => {
+          if (section.type === "preorder") {
+            return renderPreorderSection(section.id, section.title);
+          }
+
           if (section.type === "combos") {
             // Filter combos: hide if any included product is unavailable due to expired batches
             const availableCombos = combos.filter(combo =>

@@ -68,7 +68,7 @@ export default function Sections() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-3xl font-display font-bold">Sections</h1>
-          <p className="text-muted-foreground text-sm mt-1">Manage homepage sections and assign products to them.</p>
+          <p className="text-muted-foreground text-sm mt-1">Manage homepage sections, product groups, and preorder placement.</p>
         </div>
         <SectionDialog open={isCreateOpen} onOpenChange={setIsCreateOpen} />
       </div>
@@ -125,7 +125,7 @@ export default function Sections() {
                     <AlertDialogHeader>
                       <AlertDialogTitle>Delete section?</AlertDialogTitle>
                       <AlertDialogDescription>
-                        This will permanently delete "{section.title}". Products assigned to this section will remain, but will no longer appear in any section on the homepage.
+                      This will permanently delete "{section.title}" from the homepage. Products and their preorder settings will remain unchanged.
                       </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
@@ -228,7 +228,15 @@ function SectionDialog({
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>Type</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value}>
+                    <Select
+                      onValueChange={(value) => {
+                        field.onChange(value);
+                        if (value === "preorder" && !form.getValues("title").trim()) {
+                          form.setValue("title", "Preorder", { shouldDirty: true });
+                        }
+                      }}
+                      value={field.value}
+                    >
                     <FormControl>
                       <SelectTrigger data-testid="select-section-type">
                         <SelectValue />
@@ -237,6 +245,7 @@ function SectionDialog({
                     <SelectContent>
                       <SelectItem value="products">Products</SelectItem>
                       <SelectItem value="combos">Combos</SelectItem>
+                      <SelectItem value="preorder">Preorder</SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
