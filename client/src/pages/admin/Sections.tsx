@@ -125,7 +125,7 @@ export default function Sections() {
                     <AlertDialogHeader>
                       <AlertDialogTitle>Delete section?</AlertDialogTitle>
                       <AlertDialogDescription>
-                      This will permanently delete "{section.title}" from the homepage. Products and their preorder settings will remain unchanged.
+                        This will permanently delete "{section.title}" from the homepage. Products and their preorder settings will remain unchanged.
                       </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
@@ -228,15 +228,15 @@ function SectionDialog({
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>Type</FormLabel>
-                    <Select
-                      onValueChange={(value) => {
-                        field.onChange(value);
-                        if (value === "preorder" && !form.getValues("title").trim()) {
-                          form.setValue("title", "Preorder", { shouldDirty: true });
-                        }
-                      }}
-                      value={field.value}
-                    >
+                  <Select
+                    onValueChange={(value) => {
+                      field.onChange(value);
+                      if (value === "preorder" && !form.getValues("title").trim()) {
+                        form.setValue("title", "Preorder", { shouldDirty: true });
+                      }
+                    }}
+                    value={field.value}
+                  >
                     <FormControl>
                       <SelectTrigger data-testid="select-section-type">
                         <SelectValue />
