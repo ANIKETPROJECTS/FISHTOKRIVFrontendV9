@@ -534,7 +534,10 @@ export default function Home() {
           }
 
           // "products" type section
-          const isAllProducts = section.title.trim().toUpperCase() === "ALL PRODUCTS";
+          const normalizedTitle = section.title.trim().toLowerCase().replace(/[^a-z]/g, "");
+          const isAllProducts = normalizedTitle === "allproducts";
+          const isBestSeller = normalizedTitle === "bestseller";
+          const usesGridLayout = isAllProducts || isBestSeller;
           const sectionProducts = getSectionProducts(section.id, isAllProducts);
           return (
             <section key={section.id} className="mb-7">
@@ -543,7 +546,7 @@ export default function Home() {
                   {section.title}
                 </h2>
               </div>
-              {isAllProducts ? (
+              {usesGridLayout ? (
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
                   {isLoading
                     ? [1,2,3,4,5,6,7,8].map(i => <Skeleton key={i} className="aspect-[3/4] rounded-3xl" />)
