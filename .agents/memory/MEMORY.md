@@ -11,4 +11,5 @@
 - [Same-day slot cutoff](same-day-slot-cutoff.md) — enforce the 30-minute cutoff server-side in India time; stale carts can submit after the UI hides a slot.
 - [Cross-channel inventory mismatch](inventory-channel-mismatch.md) — storefront caps must match checkout stock; external POS batches cannot be added to storefront inventory without an atomic shared decrement.
 - [Production logging and polling](production-logging-and-polling.md) — production API logs stay concise; live catalog refresh is explicit rather than global.
+- [Production hosting](production-hosting.md) — fishtokri.com runs on the user's VPS, so Replit publishing does not update the live storefront.
 - [Keep checkout helpers isolated](checkout-helper-imports.md) — stock calculations used by tests should not import DB-connected sync modules.
