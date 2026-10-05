@@ -4,6 +4,7 @@ import {
   buildFailedRazorpayPaymentState,
   buildSuccessfulRazorpayPaymentState,
   isFtwStorefrontOrder,
+  isRazorpayHeartbeatStale,
   isRazorpayPaymentInProgress,
   isSuccessfulRazorpayStatus,
   shouldValidatePrePaymentGuards,
@@ -89,6 +90,27 @@ test("cancelled and failed attempts are not treated as in-progress payments", ()
   for (const status of ["authorized", "authorized_pending", "pending", "processing"]) {
     assert.equal(isRazorpayPaymentInProgress(status), true, status);
   }
+});
+
+test("checkout heartbeat expiry uses the last heartbeat, falling back to checkout creation", () => {
+  assert.equal(isRazorpayHeartbeatStale({
+    lastHeartbeatAt: new Date(95_000),
+    createdAt: new Date(0),
+    nowMs: 100_000,
+    staleAfterMs: 10_000,
+  }), false);
+  assert.equal(isRazorpayHeartbeatStale({
+    lastHeartbeatAt: new Date(80_000),
+    createdAt: new Date(0),
+    nowMs: 100_000,
+    staleAfterMs: 10_000,
+  }), true);
+  assert.equal(isRazorpayHeartbeatStale({
+    lastHeartbeatAt: null,
+    createdAt: new Date(80_000),
+    nowMs: 100_000,
+    staleAfterMs: 10_000,
+  }), true);
 });
 
 test("pre-payment guards stop re-running after verified capture", () => {

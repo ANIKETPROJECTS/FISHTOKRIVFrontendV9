@@ -25,6 +25,7 @@ import {
   buildFailedRazorpayPaymentState,
   buildSuccessfulRazorpayPaymentState,
   isFtwStorefrontOrder,
+  isRazorpayHeartbeatStale,
   isRazorpayPaymentInProgress,
   isSuccessfulRazorpayStatus,
   shouldValidatePrePaymentGuards,
@@ -39,6 +40,9 @@ declare module "express-session" {
 const OTP_TTL_MS = 5 * 60 * 1000;
 const INDIA_TIME_ZONE = "Asia/Kolkata";
 const PENDING_RAZORPAY_ORDER_TTL_MS = 60 * 60 * 1000;
+const RAZORPAY_HEARTBEAT_STALE_MS = 2 * 60 * 1000;
+const RAZORPAY_HEARTBEAT_RECHECK_MS = 30 * 1000;
+const RAZORPAY_HEARTBEAT_WATCHDOG_INTERVAL_MS = 15 * 1000;
 
 function hashRazorpayCancelToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -853,6 +857,9 @@ export async function registerRoutes(
               finalizedOrderId: null,
               lastFinalizationError: null,
               cancelTokenHash: hashRazorpayCancelToken(cancelToken),
+              lastHeartbeatAt: new Date(),
+              heartbeatWatchdogCheckedAt: null,
+              heartbeatWatchdogFailedAt: null,
             },
             $setOnInsert: { createdAt: new Date() },
           },
@@ -1195,6 +1202,118 @@ export async function registerRoutes(
     }
   });
 
+  const markPendingRazorpayOrderFailed = async (
+    razorpayOrderId: string,
+    failedPayment?: any,
+  ): Promise<{ result: "failed" | "completed" | "processing"; order?: any }> => {
+    const OrderModel = getOrderModel();
+    const existingOrder = await OrderModel.findOne({ razorpayOrderId }).lean() as any;
+    if (["completed", "paid"].includes(String(existingOrder?.paymentStatus))) {
+      return { result: "completed", order: existingOrder };
+    }
+    if (!existingOrder || !["pending", "failed"].includes(String(existingOrder.paymentStatus))) {
+      return { result: "processing", order: existingOrder };
+    }
+
+    const existingUpiPayment = Array.isArray(existingOrder.payments)
+      ? existingOrder.payments.find((payment: any) => payment?.mode === "upi")
+      : null;
+    const providerAmountPaise = Number(failedPayment?.amount);
+    const paymentAmount =
+      Number.isFinite(providerAmountPaise) && providerAmountPaise > 0
+        ? providerAmountPaise / 100
+        : Number(existingUpiPayment?.amount ?? 0);
+    const failedState = buildFailedRazorpayPaymentState({
+      paymentAmount,
+      paymentId: failedPayment?.id ? String(failedPayment.id) : null,
+      existingPayments: existingOrder.payments,
+    });
+    const now = new Date();
+    const failedOrder = await OrderModel.findOneAndUpdate(
+      {
+        razorpayOrderId,
+        paymentStatus: { $in: ["pending", "failed"] },
+      },
+      {
+        $set: { ...failedState, updatedAt: now },
+        $unset: { pendingPaymentExpiresAt: 1 },
+      },
+      { new: true },
+    ).lean();
+
+    if (failedOrder) {
+      await getPendingCheckoutModel().updateOne(
+        { razorpayOrderId },
+        { $set: { heartbeatWatchdogCheckedAt: now, heartbeatWatchdogFailedAt: now } },
+      );
+      return { result: "failed", order: failedOrder };
+    }
+
+    const currentOrder = await OrderModel.findOne({ razorpayOrderId }).lean() as any;
+    if (["completed", "paid"].includes(String(currentOrder?.paymentStatus))) {
+      return { result: "completed", order: currentOrder };
+    }
+    if (currentOrder?.paymentStatus === "failed") {
+      await getPendingCheckoutModel().updateOne(
+        { razorpayOrderId },
+        { $set: { heartbeatWatchdogCheckedAt: now, heartbeatWatchdogFailedAt: now } },
+      );
+      return { result: "failed", order: currentOrder };
+    }
+    return { result: "processing", order: currentOrder };
+  };
+
+  app.post("/api/razorpay/checkout-heartbeat", async (req, res) => {
+    if (!razorpay) return res.status(503).json({ message: "Payment service not configured" });
+    const razorpayOrderId = String(req.body?.razorpayOrderId ?? "");
+    const cancelToken = req.body?.cancelToken;
+    if (!razorpayOrderId || typeof cancelToken !== "string") {
+      return res.status(400).json({ message: "Razorpay order and cancellation token are required." });
+    }
+
+    try {
+      const PendingCheckout = getPendingCheckoutModel();
+      const pending = await PendingCheckout.findOne({ razorpayOrderId }).lean() as any;
+      if (!pending || !isRazorpayCancelTokenValid(cancelToken, pending.cancelTokenHash)) {
+        return res.status(404).json({ message: "Pending checkout was not found." });
+      }
+
+      const existingOrder = await getOrderModel().findOne({ razorpayOrderId }).lean() as any;
+      if (["completed", "paid"].includes(String(existingOrder?.paymentStatus))) {
+        return res.json({ result: "completed" });
+      }
+      if (existingOrder?.paymentStatus === "failed") {
+        const payments = await (razorpay as any).orders.fetchPayments(razorpayOrderId);
+        const captured = (payments.items ?? []).find((payment: any) => payment.status === "captured");
+        if (captured?.id) {
+          await finalizeCapturedRazorpayPayment(razorpayOrderId, String(captured.id));
+          return res.json({ result: "completed" });
+        }
+        return res.json({ result: "failed" });
+      }
+
+      const heartbeat = await PendingCheckout.findOneAndUpdate(
+        {
+          razorpayOrderId,
+          cancelTokenHash: pending.cancelTokenHash,
+          finalizationStatus: { $in: ["pending", "retryable", "processing"] },
+          heartbeatWatchdogFailedAt: null,
+        },
+        {
+          $set: {
+            lastHeartbeatAt: new Date(),
+            heartbeatWatchdogCheckedAt: null,
+          },
+        },
+        { new: true },
+      ).select("_id").lean();
+      return res.json({ result: heartbeat ? "active" : "inactive" });
+    } catch (error: any) {
+      console.error(`[Razorpay heartbeat] Could not update ${razorpayOrderId}:`, error?.message ?? "unknown error");
+      return res.status(503).json({ message: "Could not update the payment heartbeat." });
+    }
+  });
+
   app.post("/api/razorpay/cancel-order", async (req, res) => {
     if (!razorpay) return res.status(503).json({ message: "Payment service not configured" });
     const razorpayOrderId = String(req.body?.razorpayOrderId ?? "");
@@ -1257,46 +1376,11 @@ export async function registerRoutes(
           ? reportedPayment
           : failedPayments[failedPayments.length - 1];
       if (failedPayment || reportedFailure) {
-        const existingUpiPayment = Array.isArray(existingOrder?.payments)
-          ? existingOrder.payments.find((payment: any) => payment?.mode === "upi")
-          : null;
-        const providerAmountPaise = Number(failedPayment?.amount);
-        const paymentAmount =
-          Number.isFinite(providerAmountPaise) && providerAmountPaise > 0
-            ? providerAmountPaise / 100
-            : Number(existingUpiPayment?.amount ?? 0);
-        const failedState = buildFailedRazorpayPaymentState({
-          paymentAmount,
-          paymentId: failedPayment?.id
-            ? String(failedPayment.id)
-            : reportedPayment?.id
-              ? String(reportedPayment.id)
-              : null,
-          existingPayments: existingOrder?.payments,
-        });
-        const failedOrder = await getOrderModel().findOneAndUpdate(
-          {
-            razorpayOrderId,
-            paymentStatus: { $in: ["pending", "failed"] },
-          },
-          {
-            $set: { ...failedState, updatedAt: new Date() },
-            $unset: { pendingPaymentExpiresAt: 1 },
-          },
-          { new: true },
-        ).lean();
-        if (failedOrder) {
-          return res.json({ result: "failed", order: failedOrder, deleted: false });
-        }
-
-        const currentOrder = await getOrderModel().findOne({ razorpayOrderId }).lean() as any;
-        if (["completed", "paid"].includes(String(currentOrder?.paymentStatus))) {
-          return res.json({ result: "completed", order: currentOrder });
-        }
-        if (currentOrder?.paymentStatus === "failed") {
-          return res.json({ result: "failed", order: currentOrder, deleted: false });
-        }
-        return res.json({ result: "processing", deleted: false });
+        const failure = await markPendingRazorpayOrderFailed(
+          razorpayOrderId,
+          failedPayment ?? (reportedFailure && reportedPaymentId ? { id: reportedPaymentId } : undefined),
+        );
+        return res.json({ ...failure, deleted: false });
       }
 
       if (existingOrder?.paymentStatus === "failed") {
@@ -1368,6 +1452,143 @@ export async function registerRoutes(
       return res.status(503).json({ message: "Order finalization will be retried" });
     }
   });
+
+  if (razorpay) {
+    let heartbeatWatchdogRunning = false;
+    const staleHeartbeatFilter = (staleBefore: Date) => ({
+      $or: [
+        { lastHeartbeatAt: { $lte: staleBefore } },
+        { $and: [{ lastHeartbeatAt: null }, { createdAt: { $lte: staleBefore } }] },
+      ],
+    });
+    const reconcileAbandonedCheckouts = async () => {
+      if (heartbeatWatchdogRunning) return;
+      heartbeatWatchdogRunning = true;
+      try {
+        const PendingCheckout = getPendingCheckoutModel();
+        const now = new Date();
+        const staleBefore = new Date(now.getTime() - RAZORPAY_HEARTBEAT_STALE_MS);
+        const recheckBefore = new Date(now.getTime() - RAZORPAY_HEARTBEAT_RECHECK_MS);
+        const candidates = await PendingCheckout.find({
+          createdAt: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) },
+          autoRecoveryEligible: true,
+          finalizationStatus: { $in: ["pending", "retryable"] },
+          heartbeatWatchdogFailedAt: null,
+          $and: [
+            staleHeartbeatFilter(staleBefore),
+            {
+              $or: [
+                { heartbeatWatchdogCheckedAt: null },
+                { heartbeatWatchdogCheckedAt: { $lte: recheckBefore } },
+              ],
+            },
+          ],
+        }).sort({ lastHeartbeatAt: 1, createdAt: 1 }).limit(25).lean() as any[];
+
+        for (const candidate of candidates) {
+          try {
+            const checkedAt = new Date();
+            const staleAtCheck = new Date(checkedAt.getTime() - RAZORPAY_HEARTBEAT_STALE_MS);
+            const recheckAtCheck = new Date(checkedAt.getTime() - RAZORPAY_HEARTBEAT_RECHECK_MS);
+            const checkout = await PendingCheckout.findOneAndUpdate(
+              {
+                _id: candidate._id,
+                autoRecoveryEligible: true,
+                finalizationStatus: { $in: ["pending", "retryable"] },
+                heartbeatWatchdogFailedAt: null,
+                $and: [
+                  staleHeartbeatFilter(staleAtCheck),
+                  {
+                    $or: [
+                      { heartbeatWatchdogCheckedAt: null },
+                      { heartbeatWatchdogCheckedAt: { $lte: recheckAtCheck } },
+                    ],
+                  },
+                ],
+              },
+              { $set: { heartbeatWatchdogCheckedAt: checkedAt } },
+              { new: true },
+            ).select("razorpayOrderId lastHeartbeatAt createdAt").lean() as any;
+            if (
+              !checkout ||
+              !isRazorpayHeartbeatStale({
+                lastHeartbeatAt: checkout.lastHeartbeatAt,
+                createdAt: checkout.createdAt,
+                nowMs: Date.now(),
+                staleAfterMs: RAZORPAY_HEARTBEAT_STALE_MS,
+              })
+            ) {
+              continue;
+            }
+
+            const payments = await (razorpay as any).orders.fetchPayments(checkout.razorpayOrderId);
+            const captured = (payments.items ?? []).find((payment: any) => payment.status === "captured");
+            if (captured?.id) {
+              await finalizeCapturedRazorpayPayment(
+                String(checkout.razorpayOrderId),
+                String(captured.id),
+              );
+              continue;
+            }
+
+            // A heartbeat timeout means the checkout owner is gone. If Razorpay
+            // has not captured payment, retain the same order as failed. A later
+            // capture is still allowed to finalize it through the webhook path.
+            const latest = await PendingCheckout.findById(checkout._id)
+              .select("lastHeartbeatAt createdAt heartbeatWatchdogFailedAt")
+              .lean() as any;
+            if (
+              !latest ||
+              latest.heartbeatWatchdogFailedAt ||
+              !isRazorpayHeartbeatStale({
+                lastHeartbeatAt: latest.lastHeartbeatAt,
+                createdAt: latest.createdAt,
+                nowMs: Date.now(),
+                staleAfterMs: RAZORPAY_HEARTBEAT_STALE_MS,
+              })
+            ) {
+              continue;
+            }
+
+            const failedPayments = (payments.items ?? [])
+              .filter((payment: any) => payment.status === "failed")
+              .sort((a: any, b: any) => Number(b.created_at ?? 0) - Number(a.created_at ?? 0));
+            const failure = await markPendingRazorpayOrderFailed(
+              String(checkout.razorpayOrderId),
+              failedPayments[0],
+            );
+            if (failure.result === "completed") continue;
+
+            const failedAt = new Date();
+            await PendingCheckout.updateOne(
+              { _id: checkout._id, heartbeatWatchdogFailedAt: null },
+              { $set: { heartbeatWatchdogCheckedAt: failedAt, heartbeatWatchdogFailedAt: failedAt } },
+            );
+            if (failure.result === "failed") {
+              console.info(
+                `[Razorpay heartbeat] Marked abandoned checkout ${checkout.razorpayOrderId} failed.`,
+              );
+            }
+          } catch (error: any) {
+            console.error(
+              `[Razorpay heartbeat] Watchdog check failed for ${candidate.razorpayOrderId}:`,
+              error?.message ?? "unknown error",
+            );
+          }
+        }
+      } catch (error) {
+        console.error("[Razorpay heartbeat] Pending checkout scan failed:", error);
+      } finally {
+        heartbeatWatchdogRunning = false;
+      }
+    };
+
+    const heartbeatWatchdogTimer = setInterval(() => {
+      void reconcileAbandonedCheckouts();
+    }, RAZORPAY_HEARTBEAT_WATCHDOG_INTERVAL_MS);
+    heartbeatWatchdogTimer.unref?.();
+    void reconcileAbandonedCheckouts();
+  }
 
   if (razorpay && process.env.NODE_ENV === "production") {
     let reconciliationRunning = false;

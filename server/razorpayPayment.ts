@@ -98,6 +98,25 @@ export function isRazorpayPaymentInProgress(status: unknown): boolean {
   return ["authorized", "authorized_pending", "pending", "processing"].includes(String(status));
 }
 
+export function isRazorpayHeartbeatStale({
+  lastHeartbeatAt,
+  createdAt,
+  nowMs,
+  staleAfterMs,
+}: {
+  lastHeartbeatAt?: Date | string | null;
+  createdAt?: Date | string | null;
+  nowMs: number;
+  staleAfterMs: number;
+}): boolean {
+  const reference = lastHeartbeatAt ?? createdAt;
+  if (!reference) return false;
+  const referenceMs = reference instanceof Date
+    ? reference.getTime()
+    : new Date(reference).getTime();
+  return Number.isFinite(referenceMs) && nowMs - referenceMs >= staleAfterMs;
+}
+
 export function shouldValidatePrePaymentGuards(hasCapturedPayment: boolean): boolean {
   return !hasCapturedPayment;
 }

@@ -392,6 +392,23 @@ export function CartDrawer() {
       return "unknown";
     }
   }, [showRazorpaySuccess]);
+  const handlePendingRazorpayFailure = useCallback((message: string) => {
+    const instance = razorpayInstanceRef.current;
+    orderClaimedRef.current = true;
+    paymentSucceededRef.current = true;
+    pendingRzpOrderIdRef.current = null;
+    pendingRzpCancelTokenRef.current = null;
+    pendingSelectedAddressRef.current = null;
+    razorpayInstanceRef.current = null;
+    updateRazorpayOpen(false);
+    instance?.close?.();
+    setIsProcessingPayment(false);
+    setIsCartOpen(true);
+    window.setTimeout(() => {
+      paymentSucceededRef.current = false;
+    }, 1500);
+    toast({ title: message, variant: "destructive" });
+  }, [setIsCartOpen, toast]);
 
   // Coupon state
   const [couponInput, setCouponInput] = useState("");
@@ -1383,26 +1400,11 @@ export function CartDrawer() {
           { reason: "failed", paymentId: failedPaymentId },
         ).then((result) => {
           if (result === "failed" || result === "cancelled") {
-            const instance = razorpayInstanceRef.current;
-            orderClaimedRef.current = true;
-            paymentSucceededRef.current = true;
-            pendingRzpOrderIdRef.current = null;
-            pendingRzpCancelTokenRef.current = null;
-            pendingSelectedAddressRef.current = null;
-            razorpayInstanceRef.current = null;
-            updateRazorpayOpen(false);
-            instance?.close?.();
-            setIsProcessingPayment(false);
-            setIsCartOpen(true);
-            window.setTimeout(() => {
-              paymentSucceededRef.current = false;
-            }, 1500);
-            toast({
-              title: result === "failed"
+            handlePendingRazorpayFailure(
+              result === "failed"
                 ? "Payment failed. The order is recorded as failed; you can try again."
                 : "Payment failed. You can try again.",
-              variant: "destructive",
-            });
+            );
           } else if (result === "processing") {
             toast({ title: "Payment is still processing. We'll update your order shortly." });
           }
@@ -1438,6 +1440,51 @@ export function CartDrawer() {
       document.body.appendChild(script);
     }
   }, [isCartOpen]);
+
+  // Keep the server informed while Razorpay is open. If the browser is closed,
+  // this stops and the server watchdog marks an uncaptured checkout as failed.
+  useEffect(() => {
+    if (!isRazorpayOpen) return;
+    const orderId = pendingRzpOrderIdRef.current;
+    const cancelToken = pendingRzpCancelTokenRef.current;
+    if (!orderId || !cancelToken) return;
+
+    let stopped = false;
+    let requestInFlight = false;
+    const sendHeartbeat = async () => {
+      if (stopped || requestInFlight) return;
+      requestInFlight = true;
+      try {
+        const response = await fetch("/api/razorpay/checkout-heartbeat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ razorpayOrderId: orderId, cancelToken }),
+        });
+        if (!response.ok) return;
+        const result = await response.json().catch(() => ({}));
+        if (stopped) return;
+        if (result.result === "completed") {
+          showRazorpaySuccess();
+        } else if (result.result === "failed") {
+          handlePendingRazorpayFailure(
+            "Payment was not completed. The order is recorded as failed; you can try again.",
+          );
+        }
+      } catch {
+        // The watchdog on the server remains authoritative if this browser cannot
+        // send heartbeats because it was closed or temporarily lost connectivity.
+      } finally {
+        requestInFlight = false;
+      }
+    };
+
+    void sendHeartbeat();
+    const timer = window.setInterval(() => void sendHeartbeat(), 15_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [isRazorpayOpen, showRazorpaySuccess, handlePendingRazorpayFailure]);
 
   // Keep availability current for every item in the cart, even when the drawer
   // is closed. Pause stock polling once the Razorpay checkout is open or payment

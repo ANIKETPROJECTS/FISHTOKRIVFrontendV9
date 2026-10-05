@@ -139,11 +139,20 @@ const pendingCheckoutSchema = new mongoose.Schema(
     lastFinalizationError: { type: String, default: null },
     lastAttemptAt: { type: Date, default: null },
     reconciliationCheckedAt: { type: Date, default: null },
+    lastHeartbeatAt: { type: Date, default: null },
+    heartbeatWatchdogCheckedAt: { type: Date, default: null },
+    heartbeatWatchdogFailedAt: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now, expires: 86400 }, // 24h TTL
   },
   { versionKey: false }
 );
 pendingCheckoutSchema.index({ finalizationStatus: 1, lastAttemptAt: 1 });
+pendingCheckoutSchema.index({
+  autoRecoveryEligible: 1,
+  finalizationStatus: 1,
+  lastHeartbeatAt: 1,
+  heartbeatWatchdogCheckedAt: 1,
+});
 
 export function getPendingCheckoutModel() {
   if (!ordersConnection) {

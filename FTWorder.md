@@ -23,6 +23,8 @@ When Razorpay reports a failed payment, the server checks Razorpay's payment rec
 
 If the customer closes the payment window without a failed, captured, or in-progress payment, the server deletes only that matching provisional Order document. The recovery record is retained temporarily.
 
-If the browser or tab is force-closed, it cannot send that cancellation request. MongoDB therefore expires an unpaid provisional order after one hour. The separate payment-recovery record is retained for its existing 24-hour recovery window. If a payment is captured during that window, the webhook or reconciliation process can create or finalize the order again.
+While Razorpay is open, the browser sends a token-protected heartbeat every 15 seconds. The server checks for stale checkouts every 15 seconds; after two minutes without a heartbeat, it queries Razorpay. A captured payment is finalized; otherwise the same provisional order is marked failed rather than deleted. If Razorpay confirms a capture later, the webhook or reconciliation process can still finalize that order during the recovery window.
+
+If the browser or tab is force-closed, heartbeats stop and the watchdog detects the abandoned checkout. The one-hour MongoDB expiry remains a fallback if the watchdog cannot run. The separate payment-recovery record is retained for its existing 24-hour recovery window.
 
 COD and wallet-only checkouts are unchanged.
