@@ -10,6 +10,13 @@ import { getHubModels } from "./hubConnections";
 const app = express();
 const httpServer = createServer(app);
 
+app.use((req, res, next) => {
+  if (req.path === "/combos" || req.path === "/combos/") {
+    res.setHeader("X-Robots-Tag", "noindex, follow");
+  }
+  next();
+});
+
 // ── sitemap.xml — registered FIRST so Vite cannot intercept it ───────────────
 app.get("/sitemap.xml", async (_req, res) => {
   try {
