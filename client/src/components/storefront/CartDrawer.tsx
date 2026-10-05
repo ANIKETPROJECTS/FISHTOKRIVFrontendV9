@@ -369,13 +369,14 @@ export function CartDrawer() {
   const requestPendingRazorpayOrderCleanup = useCallback(async (
     orderId: string | null | undefined,
     cancelToken: string | null | undefined,
-  ): Promise<"completed" | "processing" | "cancelled" | "unknown"> => {
+    options?: { reason?: "failed"; paymentId?: string | null },
+  ): Promise<"completed" | "processing" | "failed" | "cancelled" | "unknown"> => {
     if (!orderId || !cancelToken) return "unknown";
     try {
       const response = await fetch("/api/razorpay/cancel-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ razorpayOrderId: orderId, cancelToken }),
+        body: JSON.stringify({ razorpayOrderId: orderId, cancelToken, ...options }),
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) return "unknown";
@@ -384,6 +385,7 @@ export function CartDrawer() {
         return "completed";
       }
       if (result.result === "processing") return "processing";
+      if (result.result === "failed") return "failed";
       if (result.result === "cancelled") return "cancelled";
       return "unknown";
     } catch {
@@ -1299,6 +1301,7 @@ export function CartDrawer() {
               const cleanup = await requestPendingRazorpayOrderCleanup(
                 response.razorpay_order_id,
                 cleanupToken,
+                { paymentId: response.razorpay_payment_id },
               );
               if (cleanup !== "completed") {
                 toast({ title: "Payment verification failed. Contact support.", variant: "destructive" });
@@ -1322,6 +1325,7 @@ export function CartDrawer() {
             const cleanup = await requestPendingRazorpayOrderCleanup(
               response.razorpay_order_id,
               cleanupToken,
+              { paymentId: response.razorpay_payment_id },
             );
             if (cleanup !== "completed") {
               toast({ title: "Payment failed. Please contact support.", variant: "destructive" });
@@ -1346,6 +1350,8 @@ export function CartDrawer() {
             void requestPendingRazorpayOrderCleanup(cancelledOrderId, cleanupToken).then((result) => {
               if (result === "processing") {
                 toast({ title: "Payment is still processing. We'll update your order shortly." });
+              } else if (result === "failed") {
+                toast({ title: "Payment failed. The order is recorded as failed.", variant: "destructive" });
               } else if (result !== "completed") {
                 toast({ title: "Payment cancelled", variant: "destructive" });
               }
@@ -1363,11 +1369,20 @@ export function CartDrawer() {
       orderClaimedRef.current = false;
 
       const rzp = new (window as any).Razorpay(options);
-      rzp.on("payment.failed", () => {
+      rzp.on("payment.failed", (response: any) => {
         const failedOrderId = pendingRzpOrderIdRef.current;
         const failedCancelToken = pendingRzpCancelTokenRef.current;
-        void requestPendingRazorpayOrderCleanup(failedOrderId, failedCancelToken).then((result) => {
-          if (result === "cancelled") {
+        const failedPaymentId =
+          response?.error?.metadata?.payment_id ??
+          response?.error?.metadata?.paymentId ??
+          response?.error?.payment_id ??
+          null;
+        void requestPendingRazorpayOrderCleanup(
+          failedOrderId,
+          failedCancelToken,
+          { reason: "failed", paymentId: failedPaymentId },
+        ).then((result) => {
+          if (result === "failed" || result === "cancelled") {
             const instance = razorpayInstanceRef.current;
             orderClaimedRef.current = true;
             paymentSucceededRef.current = true;
@@ -1382,7 +1397,12 @@ export function CartDrawer() {
             window.setTimeout(() => {
               paymentSucceededRef.current = false;
             }, 1500);
-            toast({ title: "Payment failed. You can try again.", variant: "destructive" });
+            toast({
+              title: result === "failed"
+                ? "Payment failed. The order is recorded as failed; you can try again."
+                : "Payment failed. You can try again.",
+              variant: "destructive",
+            });
           } else if (result === "processing") {
             toast({ title: "Payment is still processing. We'll update your order shortly." });
           }

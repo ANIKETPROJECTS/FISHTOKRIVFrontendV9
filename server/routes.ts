@@ -22,6 +22,7 @@ import {
 import Razorpay from "razorpay";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 import {
+  buildFailedRazorpayPaymentState,
   buildSuccessfulRazorpayPaymentState,
   isFtwStorefrontOrder,
   isRazorpayPaymentInProgress,
@@ -1048,7 +1049,7 @@ export async function registerRoutes(
           throw Object.assign(new Error("The storefront order number is still being assigned."), { statusCode: 503 });
         }
       }
-      if (orderToRepair.paymentStatus === "pending") {
+      if (["pending", "failed"].includes(String(orderToRepair.paymentStatus))) {
         const orderPayload = buildVerifiedOrderPayload(pending.orderPayload);
         let createResponse = await postOrder(orderPayload, false);
         if (createResponse.status === 409) {
@@ -1198,6 +1199,10 @@ export async function registerRoutes(
     if (!razorpay) return res.status(503).json({ message: "Payment service not configured" });
     const razorpayOrderId = String(req.body?.razorpayOrderId ?? "");
     const cancelToken = req.body?.cancelToken;
+    const reportedPaymentId = typeof req.body?.paymentId === "string"
+      ? req.body.paymentId.trim()
+      : "";
+    const reportedFailure = req.body?.reason === "failed";
     if (!razorpayOrderId || typeof cancelToken !== "string") {
       return res.status(400).json({ message: "Razorpay order and cancellation token are required." });
     }
@@ -1214,7 +1219,21 @@ export async function registerRoutes(
       }
 
       const payments = await (razorpay as any).orders.fetchPayments(razorpayOrderId);
-      const captured = (payments.items ?? []).find((payment: any) => payment.status === "captured");
+      let reportedPayment: any = null;
+      if (reportedPaymentId) {
+        try {
+          reportedPayment = await (razorpay as any).payments.fetch(reportedPaymentId);
+        } catch (paymentFetchError) {
+          if (!reportedFailure) throw paymentFetchError;
+          console.warn(`[Razorpay cancel] Could not fetch reported failed payment ${reportedPaymentId}; checking the order payment list.`);
+        }
+      }
+      if (reportedPayment && String(reportedPayment.order_id) !== razorpayOrderId) {
+        return res.status(400).json({ message: "Payment does not belong to this checkout." });
+      }
+      const captured =
+        (payments.items ?? []).find((payment: any) => payment.status === "captured") ??
+        (reportedPayment?.status === "captured" ? reportedPayment : null);
       if (captured?.id) {
         const finalizedOrder = await finalizeCapturedRazorpayPayment(
           razorpayOrderId,
@@ -1225,9 +1244,63 @@ export async function registerRoutes(
 
       const paymentInProgress = (payments.items ?? []).some((payment: any) =>
         isRazorpayPaymentInProgress(payment.status),
-      );
+      ) || isRazorpayPaymentInProgress(reportedPayment?.status);
       if (paymentInProgress) {
         return res.json({ result: "processing", deleted: false });
+      }
+
+      const failedPayments = (payments.items ?? [])
+        .filter((payment: any) => payment.status === "failed")
+        .sort((a: any, b: any) => Number(a.created_at ?? 0) - Number(b.created_at ?? 0));
+      const failedPayment =
+        reportedPayment?.status === "failed"
+          ? reportedPayment
+          : failedPayments[failedPayments.length - 1];
+      if (failedPayment || reportedFailure) {
+        const existingUpiPayment = Array.isArray(existingOrder?.payments)
+          ? existingOrder.payments.find((payment: any) => payment?.mode === "upi")
+          : null;
+        const providerAmountPaise = Number(failedPayment?.amount);
+        const paymentAmount =
+          Number.isFinite(providerAmountPaise) && providerAmountPaise > 0
+            ? providerAmountPaise / 100
+            : Number(existingUpiPayment?.amount ?? 0);
+        const failedState = buildFailedRazorpayPaymentState({
+          paymentAmount,
+          paymentId: failedPayment?.id
+            ? String(failedPayment.id)
+            : reportedPayment?.id
+              ? String(reportedPayment.id)
+              : null,
+          existingPayments: existingOrder?.payments,
+        });
+        const failedOrder = await getOrderModel().findOneAndUpdate(
+          {
+            razorpayOrderId,
+            paymentStatus: { $in: ["pending", "failed"] },
+          },
+          {
+            $set: { ...failedState, updatedAt: new Date() },
+            $unset: { pendingPaymentExpiresAt: 1 },
+          },
+          { new: true },
+        ).lean();
+        if (failedOrder) {
+          return res.json({ result: "failed", order: failedOrder, deleted: false });
+        }
+
+        const currentOrder = await getOrderModel().findOne({ razorpayOrderId }).lean() as any;
+        if (["completed", "paid"].includes(String(currentOrder?.paymentStatus))) {
+          return res.json({ result: "completed", order: currentOrder });
+        }
+        if (currentOrder?.paymentStatus === "failed") {
+          return res.json({ result: "failed", order: currentOrder, deleted: false });
+        }
+        return res.json({ result: "processing", deleted: false });
+      }
+
+      if (existingOrder?.paymentStatus === "failed") {
+        return res.json({ result: "failed", order: existingOrder, deleted: false });
       }
 
       const deleted = await getOrderModel().deleteOne({
@@ -1580,7 +1653,7 @@ export async function registerRoutes(
           }
 
           if (isFtwStorefrontOrder(existing)) {
-            if (existing.paymentStatus === "pending") {
+            if (["pending", "failed"].includes(String(existing.paymentStatus))) {
               pendingExistingOrderId = String(existing._id);
             } else {
               const paymentState = buildSuccessfulRazorpayPaymentState({
@@ -1936,7 +2009,7 @@ export async function registerRoutes(
       let generatedOrderId: string;
       if (pendingExistingOrderId) {
         const updatedPendingOrder = await OrderModel.findOneAndUpdate(
-          { _id: pendingExistingOrderId, paymentStatus: "pending" },
+          { _id: pendingExistingOrderId, paymentStatus: { $in: ["pending", "failed"] } },
           {
             $set: { ...orderInput, updatedAt: new Date() },
             $unset: { pendingPaymentExpiresAt: 1 },

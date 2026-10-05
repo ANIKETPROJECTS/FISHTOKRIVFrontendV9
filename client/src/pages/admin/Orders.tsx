@@ -48,6 +48,7 @@ export default function Orders() {
               const inventoryReviewRequired = Boolean((order as any).inventoryReviewRequired);
               const paymentStatus = String(order.paymentStatus ?? "");
               const paymentPending = paymentStatus === "pending";
+              const paymentFailed = paymentStatus === "failed";
               const paymentCompleted = paymentStatus === "completed" || paymentStatus === "paid";
 
               return (
@@ -61,6 +62,9 @@ export default function Orders() {
                     {order.orderId && <div className="text-xs font-mono text-primary mt-0.5">{order.orderId}</div>}
                     {paymentPending && (
                       <div className="text-xs font-medium text-amber-700 mt-1">Awaiting UPI payment</div>
+                    )}
+                    {paymentFailed && (
+                      <div className="text-xs font-medium text-red-700 mt-1">Payment failed</div>
                     )}
                     {paymentCompleted && (
                       <div className="text-xs font-medium text-emerald-700 mt-1">Paid online</div>
@@ -84,7 +88,7 @@ export default function Orders() {
                   <TableCell className="text-right">
                     <Select 
                       defaultValue={order.status} 
-                      disabled={paymentPending}
+                      disabled={paymentPending || paymentFailed}
                       onValueChange={(val) => updateStatus({ id: order.id, status: val })}
                     >
                       <SelectTrigger className={`w-[140px] h-8 text-xs ml-auto ${statusConfig.color}`}>

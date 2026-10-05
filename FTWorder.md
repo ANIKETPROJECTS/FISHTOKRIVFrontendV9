@@ -9,7 +9,7 @@ When a customer starts a UPI checkout, the server creates the Razorpay order and
 - The expected UPI amount and checkout details.
 - `inventoryDeducted: false`; inventory remains under the Admin panel's control.
 
-The provisional order is visible in Admin Orders as **Awaiting UPI payment**. Its status controls are disabled until payment is completed. It does not yet trigger order-confirmation messages, coupon or delivery-slot updates, or wallet deductions.
+The provisional order is visible in Admin Orders as **Awaiting UPI payment**. Its status controls are disabled while payment is pending or failed, and become available after successful payment. It does not yet trigger order-confirmation messages, coupon or delivery-slot updates, or wallet deductions.
 
 ## After a successful payment
 
@@ -19,7 +19,9 @@ Customer-order synchronization, coupon usage, delivery-slot counts, wallet deduc
 
 ## Cancellation, failure, and force-closing the browser
 
-When Razorpay reports a payment failure or the customer closes the payment window, the browser asks the server to check Razorpay's payment records. If no payment is captured or still in progress, the server deletes only the matching provisional Order document. A failed payment closes the current payment window so a retry starts with a fresh provisional order. The recovery record remains temporarily so a delayed captured-payment webhook can still restore the order.
+When Razorpay reports a failed payment, the server checks Razorpay's payment records and marks the same Order document `paymentStatus: "failed"` instead of deleting it. The failed UPI attempt and payment ID are retained, and the order stays visible in Admin Orders with status changes disabled. A failed payment closes the current payment window so a retry starts with a fresh provisional order. The recovery record remains temporarily so a delayed captured-payment webhook can still complete the order if Razorpay later confirms a capture.
+
+If the customer closes the payment window without a failed, captured, or in-progress payment, the server deletes only that matching provisional Order document. The recovery record is retained temporarily.
 
 If the browser or tab is force-closed, it cannot send that cancellation request. MongoDB therefore expires an unpaid provisional order after one hour. The separate payment-recovery record is retained for its existing 24-hour recovery window. If a payment is captured during that window, the webhook or reconciliation process can create or finalize the order again.
 

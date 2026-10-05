@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildFailedRazorpayPaymentState,
   buildSuccessfulRazorpayPaymentState,
   isFtwStorefrontOrder,
   isRazorpayPaymentInProgress,
@@ -59,6 +60,26 @@ test("only captured Razorpay payments are successful", () => {
     assert.equal(isSuccessfulRazorpayStatus(status), false, status);
   }
   assert.equal(isSuccessfulRazorpayStatus("captured"), true);
+});
+
+test("failed Razorpay payments remain recorded without changing paid totals", () => {
+  const state = buildFailedRazorpayPaymentState({
+    paymentAmount: 1000,
+    paymentId: "pay_failed",
+    existingPayments: [
+      { mode: "wallet", amount: 249, reference: "" },
+      { mode: "upi", amount: 1000, reference: "" },
+    ],
+  });
+
+  assert.equal(state.paymentStatus, "failed");
+  assert.equal(state.upiTransactionId, "pay_failed");
+  assert.deepEqual(state.payments, [
+    { mode: "wallet", amount: 249, reference: "" },
+    { mode: "upi", amount: 1000, reference: "pay_failed", status: "failed" },
+  ]);
+  assert.equal("paidAmount" in state, false);
+  assert.equal("dueAmount" in state, false);
 });
 
 test("cancelled and failed attempts are not treated as in-progress payments", () => {

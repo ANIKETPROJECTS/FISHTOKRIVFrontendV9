@@ -2,6 +2,7 @@ export type RazorpayPaymentEntry = {
   mode: string;
   amount: number;
   reference?: string;
+  status?: string;
   paidAt?: Date | string;
 };
 
@@ -52,6 +53,40 @@ export function buildSuccessfulRazorpayPaymentState({
     paidAmount: normalizedTotal,
     dueAmount: 0,
     upiTransactionId: paymentId,
+  };
+}
+
+export function buildFailedRazorpayPaymentState({
+  paymentAmount,
+  paymentId,
+  existingPayments = [],
+}: {
+  paymentAmount?: number;
+  paymentId?: string | null;
+  existingPayments?: RazorpayPaymentEntry[] | null;
+}) {
+  const walletPayments = (existingPayments ?? []).filter(
+    (payment) => payment.mode === "wallet",
+  );
+  const existingUpiPayment = (existingPayments ?? []).find(
+    (payment) => payment.mode === "upi",
+  );
+  const failedPaymentId = paymentId || existingUpiPayment?.reference || "";
+
+  return {
+    paymentMode: "upi",
+    upiVariant: "RZPAY",
+    paymentStatus: "failed",
+    payments: [
+      ...walletPayments,
+      {
+        mode: "upi",
+        amount: Number(paymentAmount ?? existingUpiPayment?.amount ?? 0),
+        reference: failedPaymentId,
+        status: "failed",
+      },
+    ],
+    upiTransactionId: failedPaymentId || null,
   };
 }
 
