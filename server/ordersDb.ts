@@ -140,6 +140,8 @@ const pendingCheckoutSchema = new mongoose.Schema(
     lastAttemptAt: { type: Date, default: null },
     reconciliationCheckedAt: { type: Date, default: null },
     lastHeartbeatAt: { type: Date, default: null },
+    backgroundedAt: { type: Date, default: null },
+    visibilitySequence: { type: Number, default: 0 },
     heartbeatWatchdogCheckedAt: { type: Date, default: null },
     heartbeatWatchdogFailedAt: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now, expires: 86400 }, // 24h TTL
@@ -151,6 +153,7 @@ pendingCheckoutSchema.index({
   autoRecoveryEligible: 1,
   finalizationStatus: 1,
   lastHeartbeatAt: 1,
+  backgroundedAt: 1,
   heartbeatWatchdogCheckedAt: 1,
 });
 

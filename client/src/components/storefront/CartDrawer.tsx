@@ -369,7 +369,7 @@ export function CartDrawer() {
   const requestPendingRazorpayOrderCleanup = useCallback(async (
     orderId: string | null | undefined,
     cancelToken: string | null | undefined,
-    options?: { reason?: "failed"; paymentId?: string | null },
+    options?: { reason?: "failed" | "abandoned"; paymentId?: string | null },
   ): Promise<"completed" | "processing" | "failed" | "cancelled" | "unknown"> => {
     if (!orderId || !cancelToken) return "unknown";
     try {
@@ -377,6 +377,7 @@ export function CartDrawer() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ razorpayOrderId: orderId, cancelToken, ...options }),
+        keepalive: true,
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) return "unknown";
@@ -1364,7 +1365,7 @@ export function CartDrawer() {
             pendingSelectedAddressRef.current = null;
             setIsProcessingPayment(false);
             setIsCartOpen(true);
-            void requestPendingRazorpayOrderCleanup(cancelledOrderId, cleanupToken).then((result) => {
+            void requestPendingRazorpayOrderCleanup(cancelledOrderId, cleanupToken, { reason: "abandoned" }).then((result) => {
               if (result === "processing") {
                 toast({ title: "Payment is still processing. We'll update your order shortly." });
               } else if (result === "failed") {
@@ -1441,8 +1442,8 @@ export function CartDrawer() {
     }
   }, [isCartOpen]);
 
-  // Keep the server informed while Razorpay is open. If the browser is closed,
-  // this stops and the server watchdog marks an uncaptured checkout as failed.
+  // Keep the server informed while Razorpay is open. Hidden tabs pause the
+  // watchdog briefly so switching to a UPI app is not mistaken for abandonment.
   useEffect(() => {
     if (!isRazorpayOpen) return;
     const orderId = pendingRzpOrderIdRef.current;
@@ -1450,15 +1451,20 @@ export function CartDrawer() {
     if (!orderId || !cancelToken) return;
 
     let stopped = false;
-    let requestInFlight = false;
+    let visibilitySequence = 0;
     const sendHeartbeat = async () => {
-      if (stopped || requestInFlight) return;
-      requestInFlight = true;
+      if (stopped) return;
+      const sequence = ++visibilitySequence;
       try {
         const response = await fetch("/api/razorpay/checkout-heartbeat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ razorpayOrderId: orderId, cancelToken }),
+          body: JSON.stringify({
+            razorpayOrderId: orderId,
+            cancelToken,
+            visibility: "visible",
+            visibilitySequence: sequence,
+          }),
         });
         if (!response.ok) return;
         const result = await response.json().catch(() => ({}));
@@ -1471,20 +1477,93 @@ export function CartDrawer() {
           );
         }
       } catch {
-        // The watchdog on the server remains authoritative if this browser cannot
-        // send heartbeats because it was closed or temporarily lost connectivity.
-      } finally {
-        requestInFlight = false;
+        // The server watchdog remains authoritative if a heartbeat is lost.
+      }
+    };
+    const sendBackgroundSignal = () => {
+      if (stopped) return;
+      const body = JSON.stringify({
+        razorpayOrderId: orderId,
+        cancelToken,
+        visibility: "hidden",
+        visibilitySequence: ++visibilitySequence,
+      });
+      const payload = new Blob([body], { type: "application/json" });
+      try {
+        if (navigator.sendBeacon?.("/api/razorpay/checkout-heartbeat", payload)) return;
+      } catch {
+        // Fall through to a keepalive request where Beacon is unavailable.
+      }
+      void fetch("/api/razorpay/checkout-heartbeat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        sendBackgroundSignal();
+      } else {
+        void sendHeartbeat();
       }
     };
 
-    void sendHeartbeat();
-    const timer = window.setInterval(() => void sendHeartbeat(), 15_000);
+    if (document.visibilityState === "hidden") sendBackgroundSignal();
+    else void sendHeartbeat();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void sendHeartbeat();
+    }, 15_000);
     return () => {
       stopped = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [isRazorpayOpen, showRazorpaySuccess, handlePendingRazorpayFailure]);
+
+  // A document lifecycle event is different from visibilitychange: switching
+  // to UPI or another app only backgrounds the page; closing it signals
+  // abandonment immediately. The server still verifies payment before failing.
+  useEffect(() => {
+    let sent = false;
+    const signalAbandonment = () => {
+      if (sent || !razorpayOpenRef.current || paymentSucceededRef.current) return;
+      const orderId = pendingRzpOrderIdRef.current;
+      const cancelToken = pendingRzpCancelTokenRef.current;
+      if (!orderId || !cancelToken) return;
+      sent = true;
+
+      const body = JSON.stringify({
+        razorpayOrderId: orderId,
+        cancelToken,
+        reason: "abandoned",
+      });
+      const payload = new Blob([body], { type: "application/json" });
+      try {
+        if (navigator.sendBeacon?.("/api/razorpay/cancel-order", payload)) return;
+      } catch {
+        // Fall through to a keepalive request where Beacon is unavailable.
+      }
+      void fetch("/api/razorpay/cancel-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+    };
+    const handlePageHide = (event: PageTransitionEvent) => {
+      if (event.persisted) return;
+      signalAbandonment();
+    };
+
+    window.addEventListener("beforeunload", signalAbandonment);
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      window.removeEventListener("beforeunload", signalAbandonment);
+      window.removeEventListener("pagehide", handlePageHide);
+    };
+  }, []);
 
   // Keep availability current for every item in the cart, even when the drawer
   // is closed. Pause stock polling once the Razorpay checkout is open or payment

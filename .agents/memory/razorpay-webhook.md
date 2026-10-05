@@ -36,3 +36,13 @@ Only pending checkouts explicitly marked eligible by the new checkout flow may b
 `POST /api/webhooks/razorpay` verifies `X-Razorpay-Signature` with `RAZORPAY_WEBHOOK_SECRET` and the raw request body, and processes only `payment.captured`. Return retryable 5xx responses for transient finalization failures; acknowledge unrelated events and manual-review cases.
 
 In Razorpay Dashboard → Settings → Webhooks, configure the published URL ending in `/api/webhooks/razorpay`, select `payment.captured`, and store the webhook secret in Replit Secrets.
+
+## Checkout close versus app switching
+
+Keep failed checkouts visible in Admin: mark the existing FTW order failed; do not delete it. Only a server-confirmed capture can change that order to completed, including after it was marked failed.
+
+Browser `beforeunload`/`pagehide` signals are best-effort, not guaranteed when the browser process is force-stopped. Treat `visibilitychange` to hidden as a temporary background/app switch, not abandonment; resume heartbeats when visible. Retain a server watchdog fallback for missing close signals.
+
+**Why:** A shopper may leave the browser to approve a UPI intent, and that must not look like a cancelled checkout. Conversely, a genuine close should update Admin promptly without risking a captured payment.
+
+**How to apply:** Check Razorpay for capture before marking failure. Use document-close signals for immediate abandonment, never hidden visibility alone; preserve the same order for late-capture recovery.

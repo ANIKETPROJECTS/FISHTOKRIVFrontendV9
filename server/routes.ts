@@ -24,10 +24,12 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 import {
   buildFailedRazorpayPaymentState,
   buildSuccessfulRazorpayPaymentState,
+  isRazorpayBackgroundGraceExpired,
   isFtwStorefrontOrder,
   isRazorpayHeartbeatStale,
   isRazorpayPaymentInProgress,
   isSuccessfulRazorpayStatus,
+  shouldDeferRazorpayFailure,
   shouldValidatePrePaymentGuards,
 } from "./razorpayPayment";
 
@@ -39,10 +41,10 @@ declare module "express-session" {
 
 const OTP_TTL_MS = 5 * 60 * 1000;
 const INDIA_TIME_ZONE = "Asia/Kolkata";
-const PENDING_RAZORPAY_ORDER_TTL_MS = 60 * 60 * 1000;
 const RAZORPAY_HEARTBEAT_STALE_MS = 2 * 60 * 1000;
 const RAZORPAY_HEARTBEAT_RECHECK_MS = 30 * 1000;
 const RAZORPAY_HEARTBEAT_WATCHDOG_INTERVAL_MS = 15 * 1000;
+const RAZORPAY_BACKGROUND_GRACE_MS = 15 * 60 * 1000;
 
 function hashRazorpayCancelToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -858,6 +860,8 @@ export async function registerRoutes(
               lastFinalizationError: null,
               cancelTokenHash: hashRazorpayCancelToken(cancelToken),
               lastHeartbeatAt: new Date(),
+              backgroundedAt: null,
+              visibilitySequence: 0,
               heartbeatWatchdogCheckedAt: null,
               heartbeatWatchdogFailedAt: null,
             },
@@ -1267,6 +1271,13 @@ export async function registerRoutes(
     if (!razorpay) return res.status(503).json({ message: "Payment service not configured" });
     const razorpayOrderId = String(req.body?.razorpayOrderId ?? "");
     const cancelToken = req.body?.cancelToken;
+    const visibility = req.body?.visibility === "hidden" ? "hidden" : "visible";
+    const hasVisibilitySequence =
+      Number.isSafeInteger(req.body?.visibilitySequence) &&
+      Number(req.body.visibilitySequence) >= 0;
+    const visibilitySequence = hasVisibilitySequence
+      ? Number(req.body.visibilitySequence)
+      : null;
     if (!razorpayOrderId || typeof cancelToken !== "string") {
       return res.status(400).json({ message: "Razorpay order and cancellation token are required." });
     }
@@ -1292,19 +1303,37 @@ export async function registerRoutes(
         return res.json({ result: "failed" });
       }
 
+      if (existingOrder?.pendingPaymentExpiresAt) {
+        await getOrderModel().updateOne(
+          { razorpayOrderId, paymentStatus: "pending" },
+          { $unset: { pendingPaymentExpiresAt: 1 } },
+        );
+      }
+
+      const now = new Date();
+      const heartbeatFilter: any = {
+        razorpayOrderId,
+        cancelTokenHash: pending.cancelTokenHash,
+        finalizationStatus: { $in: ["pending", "retryable", "processing"] },
+        heartbeatWatchdogFailedAt: null,
+      };
+      if (visibilitySequence !== null) {
+        heartbeatFilter.$or = [
+          { visibilitySequence: { $lte: visibilitySequence } },
+          { visibilitySequence: { $exists: false } },
+        ];
+      }
+      const heartbeatSet: Record<string, unknown> = {
+        lastHeartbeatAt: now,
+        backgroundedAt: visibility === "hidden" ? now : null,
+        heartbeatWatchdogCheckedAt: null,
+      };
+      if (visibilitySequence !== null) {
+        heartbeatSet.visibilitySequence = visibilitySequence;
+      }
       const heartbeat = await PendingCheckout.findOneAndUpdate(
-        {
-          razorpayOrderId,
-          cancelTokenHash: pending.cancelTokenHash,
-          finalizationStatus: { $in: ["pending", "retryable", "processing"] },
-          heartbeatWatchdogFailedAt: null,
-        },
-        {
-          $set: {
-            lastHeartbeatAt: new Date(),
-            heartbeatWatchdogCheckedAt: null,
-          },
-        },
+        heartbeatFilter,
+        { $set: heartbeatSet },
         { new: true },
       ).select("_id").lean();
       return res.json({ result: heartbeat ? "active" : "inactive" });
@@ -1322,6 +1351,7 @@ export async function registerRoutes(
       ? req.body.paymentId.trim()
       : "";
     const reportedFailure = req.body?.reason === "failed";
+    const explicitAbandonment = req.body?.reason === "abandoned";
     if (!razorpayOrderId || typeof cancelToken !== "string") {
       return res.status(400).json({ message: "Razorpay order and cancellation token are required." });
     }
@@ -1364,7 +1394,7 @@ export async function registerRoutes(
       const paymentInProgress = (payments.items ?? []).some((payment: any) =>
         isRazorpayPaymentInProgress(payment.status),
       ) || isRazorpayPaymentInProgress(reportedPayment?.status);
-      if (paymentInProgress) {
+      if (shouldDeferRazorpayFailure(paymentInProgress, explicitAbandonment)) {
         return res.json({ result: "processing", deleted: false });
       }
 
@@ -1375,23 +1405,11 @@ export async function registerRoutes(
         reportedPayment?.status === "failed"
           ? reportedPayment
           : failedPayments[failedPayments.length - 1];
-      if (failedPayment || reportedFailure) {
-        const failure = await markPendingRazorpayOrderFailed(
-          razorpayOrderId,
-          failedPayment ?? (reportedFailure && reportedPaymentId ? { id: reportedPaymentId } : undefined),
-        );
-        return res.json({ ...failure, deleted: false });
-      }
-
-      if (existingOrder?.paymentStatus === "failed") {
-        return res.json({ result: "failed", order: existingOrder, deleted: false });
-      }
-
-      const deleted = await getOrderModel().deleteOne({
+      const failure = await markPendingRazorpayOrderFailed(
         razorpayOrderId,
-        paymentStatus: "pending",
-      });
-      return res.json({ result: "cancelled", deleted: deleted.deletedCount > 0 });
+        failedPayment ?? (reportedFailure && reportedPaymentId ? { id: reportedPaymentId } : undefined),
+      );
+      return res.json({ ...failure, deleted: false });
     } catch (error: any) {
       console.error(`[Razorpay cancel] Could not safely cancel ${razorpayOrderId}:`, error?.message ?? "unknown error");
       return res.status(503).json({
@@ -1461,6 +1479,12 @@ export async function registerRoutes(
         { $and: [{ lastHeartbeatAt: null }, { createdAt: { $lte: staleBefore } }] },
       ],
     });
+    const backgroundGraceFilter = (graceExpiredBefore: Date) => ({
+      $or: [
+        { backgroundedAt: null },
+        { backgroundedAt: { $lte: graceExpiredBefore } },
+      ],
+    });
     const reconcileAbandonedCheckouts = async () => {
       if (heartbeatWatchdogRunning) return;
       heartbeatWatchdogRunning = true;
@@ -1469,6 +1493,7 @@ export async function registerRoutes(
         const now = new Date();
         const staleBefore = new Date(now.getTime() - RAZORPAY_HEARTBEAT_STALE_MS);
         const recheckBefore = new Date(now.getTime() - RAZORPAY_HEARTBEAT_RECHECK_MS);
+        const backgroundGraceBefore = new Date(now.getTime() - RAZORPAY_BACKGROUND_GRACE_MS);
         const candidates = await PendingCheckout.find({
           createdAt: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) },
           autoRecoveryEligible: true,
@@ -1476,6 +1501,7 @@ export async function registerRoutes(
           heartbeatWatchdogFailedAt: null,
           $and: [
             staleHeartbeatFilter(staleBefore),
+            backgroundGraceFilter(backgroundGraceBefore),
             {
               $or: [
                 { heartbeatWatchdogCheckedAt: null },
@@ -1490,6 +1516,7 @@ export async function registerRoutes(
             const checkedAt = new Date();
             const staleAtCheck = new Date(checkedAt.getTime() - RAZORPAY_HEARTBEAT_STALE_MS);
             const recheckAtCheck = new Date(checkedAt.getTime() - RAZORPAY_HEARTBEAT_RECHECK_MS);
+            const backgroundGraceAtCheck = new Date(checkedAt.getTime() - RAZORPAY_BACKGROUND_GRACE_MS);
             const checkout = await PendingCheckout.findOneAndUpdate(
               {
                 _id: candidate._id,
@@ -1498,6 +1525,7 @@ export async function registerRoutes(
                 heartbeatWatchdogFailedAt: null,
                 $and: [
                   staleHeartbeatFilter(staleAtCheck),
+                  backgroundGraceFilter(backgroundGraceAtCheck),
                   {
                     $or: [
                       { heartbeatWatchdogCheckedAt: null },
@@ -1508,7 +1536,7 @@ export async function registerRoutes(
               },
               { $set: { heartbeatWatchdogCheckedAt: checkedAt } },
               { new: true },
-            ).select("razorpayOrderId lastHeartbeatAt createdAt").lean() as any;
+            ).select("razorpayOrderId lastHeartbeatAt backgroundedAt createdAt").lean() as any;
             if (
               !checkout ||
               !isRazorpayHeartbeatStale({
@@ -1535,11 +1563,16 @@ export async function registerRoutes(
             // has not captured payment, retain the same order as failed. A later
             // capture is still allowed to finalize it through the webhook path.
             const latest = await PendingCheckout.findById(checkout._id)
-              .select("lastHeartbeatAt createdAt heartbeatWatchdogFailedAt")
+              .select("lastHeartbeatAt backgroundedAt createdAt heartbeatWatchdogFailedAt")
               .lean() as any;
             if (
               !latest ||
               latest.heartbeatWatchdogFailedAt ||
+              !isRazorpayBackgroundGraceExpired({
+                backgroundedAt: latest.backgroundedAt,
+                nowMs: Date.now(),
+                graceMs: RAZORPAY_BACKGROUND_GRACE_MS,
+              }) ||
               !isRazorpayHeartbeatStale({
                 lastHeartbeatAt: latest.lastHeartbeatAt,
                 createdAt: latest.createdAt,
@@ -2220,10 +2253,6 @@ export async function registerRoutes(
         timeslotEnd: input.timeslotEnd ?? null,
         razorpayOrderId: verifiedRazorpayPayment?.orderId ?? input.razorpayOrderId ?? null,
       };
-
-      if (isPendingRazorpayCreation) {
-        orderInput.pendingPaymentExpiresAt = new Date(Date.now() + PENDING_RAZORPAY_ORDER_TTL_MS);
-      }
 
       const OrderModel = getOrderModel();
       let order: any;

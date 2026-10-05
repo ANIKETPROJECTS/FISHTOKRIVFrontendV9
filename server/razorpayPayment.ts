@@ -98,6 +98,29 @@ export function isRazorpayPaymentInProgress(status: unknown): boolean {
   return ["authorized", "authorized_pending", "pending", "processing"].includes(String(status));
 }
 
+export function shouldDeferRazorpayFailure(
+  paymentInProgress: boolean,
+  explicitAbandonment: boolean,
+): boolean {
+  return paymentInProgress && !explicitAbandonment;
+}
+
+export function isRazorpayBackgroundGraceExpired({
+  backgroundedAt,
+  nowMs,
+  graceMs,
+}: {
+  backgroundedAt?: Date | string | null;
+  nowMs: number;
+  graceMs: number;
+}): boolean {
+  if (!backgroundedAt) return true;
+  const backgroundedAtMs = backgroundedAt instanceof Date
+    ? backgroundedAt.getTime()
+    : new Date(backgroundedAt).getTime();
+  return Number.isFinite(backgroundedAtMs) && nowMs - backgroundedAtMs >= graceMs;
+}
+
 export function isRazorpayHeartbeatStale({
   lastHeartbeatAt,
   createdAt,

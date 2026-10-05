@@ -3,10 +3,12 @@ import test from "node:test";
 import {
   buildFailedRazorpayPaymentState,
   buildSuccessfulRazorpayPaymentState,
+  isRazorpayBackgroundGraceExpired,
   isFtwStorefrontOrder,
   isRazorpayHeartbeatStale,
   isRazorpayPaymentInProgress,
   isSuccessfulRazorpayStatus,
+  shouldDeferRazorpayFailure,
   shouldValidatePrePaymentGuards,
 } from "./razorpayPayment";
 
@@ -90,6 +92,31 @@ test("cancelled and failed attempts are not treated as in-progress payments", ()
   for (const status of ["authorized", "authorized_pending", "pending", "processing"]) {
     assert.equal(isRazorpayPaymentInProgress(status), true, status);
   }
+});
+
+test("explicit checkout abandonment fails immediately even if Razorpay reports an in-progress attempt", () => {
+  assert.equal(shouldDeferRazorpayFailure(true, false), true);
+  assert.equal(shouldDeferRazorpayFailure(true, true), false);
+  assert.equal(shouldDeferRazorpayFailure(false, false), false);
+});
+
+test("backgrounded checkouts get a grace period before heartbeat recovery marks them failed", () => {
+  const backgroundedAt = new Date(100_000);
+  assert.equal(isRazorpayBackgroundGraceExpired({
+    backgroundedAt,
+    nowMs: 100_000 + 14 * 60_000,
+    graceMs: 15 * 60_000,
+  }), false);
+  assert.equal(isRazorpayBackgroundGraceExpired({
+    backgroundedAt,
+    nowMs: 100_000 + 15 * 60_000,
+    graceMs: 15 * 60_000,
+  }), true);
+  assert.equal(isRazorpayBackgroundGraceExpired({
+    backgroundedAt: null,
+    nowMs: 100_000,
+    graceMs: 15 * 60_000,
+  }), true);
 });
 
 test("checkout heartbeat expiry uses the last heartbeat, falling back to checkout creation", () => {
