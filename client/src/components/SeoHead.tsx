@@ -133,7 +133,7 @@ export function SeoHead({
       <title>{fullTitle}</title>
       <meta name="description" content={fullDescription} />
       <link rel="canonical" href={canonicalUrl} />
-      {noIndex && <meta name="robots" content="noindex, nofollow" />}
+      {noIndex && <meta name="robots" content="noindex, follow" />}
       {/* Open Graph */}
       <meta property="og:type" content={ogType} />
       <meta property="og:title" content={fullTitle} />

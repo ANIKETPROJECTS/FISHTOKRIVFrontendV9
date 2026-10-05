@@ -18,7 +18,6 @@ app.get("/sitemap.xml", async (_req, res) => {
 
     const staticUrls = [
       { loc: `${DOMAIN}/`, priority: "1.0", changefreq: "daily" },
-      { loc: `${DOMAIN}/combos`, priority: "0.7", changefreq: "weekly" },
     ];
 
     const hubs = await SubHubModel.find({ status: "Active" }).lean() as any[];

@@ -179,6 +179,7 @@ export default function CombosPage() {
         title="Combo Deals — Fresh Fish & Meat Bundles Online in Mumbai"
         description="Order fresh seafood & meat combo deals online in Mumbai. Great value bundles of fish, prawns, chicken & mutton, hygienically packed and delivered same-day. Order now on FishTokri."
         canonical="/combos"
+        noIndex
       />
       <Header />
 
