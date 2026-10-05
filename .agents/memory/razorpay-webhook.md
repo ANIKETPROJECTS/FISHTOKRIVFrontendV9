@@ -15,6 +15,14 @@ Only a server-verified Razorpay payment with `status: "captured"` counts as paid
 - The pending-checkout record has a 24-hour TTL, aligned with Razorpay's webhook retry window. The production reconciliation loop retries eligible captured payments after missed callbacks/webhooks.
 - Client retries may repeat finalization safely; the Razorpay order ID is unique on storefront orders.
 
+## Persisted completion check
+
+Do not acknowledge a captured payment as finalized based only on a successful HTTP response or an assigned order number. Re-read the order and require `paymentStatus: "completed"` or `"paid"` before marking the pending-checkout record finalized. If capture is verified but the same existing order remains pending, repair its payment fields from the verified provider data and flag the order for Admin review.
+
+**Why:** A success screen can otherwise appear while the customer’s invoice still says payment pending.
+
+**How to apply:** Make the server’s persisted order state authoritative for success callbacks, webhooks, and recovery jobs. Never create a second order for a payment that already has a provisional FTW order.
+
 ## Inventory ownership and payment recovery
 
 The Admin panel owns inventory deduction for every storefront order. Storefront order creation must validate stock where safe, never decrement hub stock, and always save `inventoryDeducted: false`. If stock changes after Razorpay capture, persist the paid order and set `inventoryReviewRequired` so Admin can resolve it.

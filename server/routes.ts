@@ -27,6 +27,7 @@ import {
   isRazorpayBackgroundGraceExpired,
   isFtwStorefrontOrder,
   isRazorpayHeartbeatStale,
+  isRazorpayOrderPaymentComplete,
   isRazorpayPaymentInProgress,
   isSuccessfulRazorpayStatus,
   shouldDeferRazorpayFailure,
@@ -966,6 +967,12 @@ export async function registerRoutes(
     }
 
     const markFinalized = async (order: any) => {
+      if (!isRazorpayOrderPaymentComplete(order?.paymentStatus)) {
+        throw Object.assign(
+          new Error("The captured payment has not been saved to the order yet."),
+          { statusCode: 503 },
+        );
+      }
       await PendingCheckout.updateOne(
         { razorpayOrderId },
         {
@@ -1002,6 +1009,54 @@ export async function registerRoutes(
           existingPayments: walletPayments,
         }),
       };
+    };
+
+    const ensureCapturedPaymentPersisted = async () => {
+      let savedOrder = await OrderModel.findOne({ razorpayOrderId }).lean() as any;
+      if (!savedOrder) {
+        throw Object.assign(new Error("The storefront order has not been saved yet."), { statusCode: 503 });
+      }
+      if (isRazorpayOrderPaymentComplete(savedOrder.paymentStatus)) return savedOrder;
+
+      if (!["pending", "failed", "unpaid", "partial"].includes(String(savedOrder.paymentStatus))) {
+        throw Object.assign(new Error("The order payment status needs manual review."), { statusCode: 503 });
+      }
+
+      // A verified capture must never be acknowledged while the provisional
+      // order still says pending. Repair that same document as a last-resort
+      // path if the normal order endpoint returned success without persisting
+      // the completed payment state. Flag Admin review because this fallback
+      // intentionally does not repeat the full checkout validation.
+      const paymentState = buildSuccessfulRazorpayPaymentState({
+        total: Number(savedOrder.total ?? pending.orderPayload.total ?? verifiedPayment.amount),
+        paymentAmount: verifiedPayment.amount,
+        paymentId: verifiedPayment.id,
+        existingPayments: savedOrder.payments,
+      });
+      const repaired = await OrderModel.findOneAndUpdate(
+        {
+          _id: savedOrder._id,
+          razorpayOrderId,
+          paymentStatus: savedOrder.paymentStatus,
+        },
+        {
+          $set: {
+            ...paymentState,
+            razorpayOrderId,
+            inventoryReviewRequired: true,
+            updatedAt: new Date(),
+          },
+          $unset: { pendingPaymentExpiresAt: 1 },
+        },
+        { new: true },
+      ).lean() as any;
+      if (isRazorpayOrderPaymentComplete(repaired?.paymentStatus)) return repaired;
+
+      // Another finalizer may have completed the order between the read and
+      // update. Read once more before reporting a retryable failure.
+      savedOrder = await OrderModel.findOne({ razorpayOrderId }).lean() as any;
+      if (isRazorpayOrderPaymentComplete(savedOrder?.paymentStatus)) return savedOrder;
+      throw Object.assign(new Error("The captured payment is verified but the order is still pending."), { statusCode: 503 });
     };
 
     const postOrder = (orderPayload: any, allowInventoryReview: boolean) => {
@@ -1075,13 +1130,12 @@ export async function registerRoutes(
           throw Object.assign(new Error(`Order finalization endpoint returned ${createResponse.status}.`), { statusCode: 503 });
         }
         const finalized = await createResponse.json() as any;
-        const savedOrder = await OrderModel.findOne({ razorpayOrderId }).select("orderId").lean() as any;
-        const finalizedOrderId = savedOrder?.orderId ?? finalized.orderId;
+        const savedOrder = await ensureCapturedPaymentPersisted();
+        const finalizedOrderId = savedOrder.orderId ?? finalized.orderId;
         if (!finalizedOrderId) {
           throw Object.assign(new Error("The storefront order number has not been saved yet."), { statusCode: 503 });
         }
-        await markFinalized({ orderId: finalizedOrderId });
-        return finalized;
+        return markFinalized({ ...savedOrder, orderId: finalizedOrderId });
       }
       const paymentState = buildSuccessfulRazorpayPaymentState({
         total: Number(orderToRepair.total ?? verifiedPayment.amount),
@@ -1164,13 +1218,12 @@ export async function registerRoutes(
       }
 
       const created = await createResponse.json() as any;
-      const savedOrder = await OrderModel.findOne({ razorpayOrderId }).select("orderId").lean() as any;
-      const finalizedOrderId = savedOrder?.orderId ?? created.orderId;
+      const savedOrder = await ensureCapturedPaymentPersisted();
+      const finalizedOrderId = savedOrder.orderId ?? created.orderId;
       if (!finalizedOrderId) {
         throw Object.assign(new Error("The storefront order number has not been saved yet."), { statusCode: 503 });
       }
-      await markFinalized({ orderId: finalizedOrderId });
-      return created;
+      return markFinalized({ ...savedOrder, orderId: finalizedOrderId });
     } catch (error) {
       await PendingCheckout.updateOne(
         { razorpayOrderId, finalizationStatus: "processing" },

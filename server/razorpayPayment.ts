@@ -94,6 +94,10 @@ export function isSuccessfulRazorpayStatus(status: unknown): boolean {
   return status === "captured";
 }
 
+export function isRazorpayOrderPaymentComplete(status: unknown): boolean {
+  return status === "completed" || status === "paid";
+}
+
 export function isRazorpayPaymentInProgress(status: unknown): boolean {
   return ["authorized", "authorized_pending", "pending", "processing"].includes(String(status));
 }

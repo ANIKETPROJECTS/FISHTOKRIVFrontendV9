@@ -6,6 +6,7 @@ import {
   isRazorpayBackgroundGraceExpired,
   isFtwStorefrontOrder,
   isRazorpayHeartbeatStale,
+  isRazorpayOrderPaymentComplete,
   isRazorpayPaymentInProgress,
   isSuccessfulRazorpayStatus,
   shouldDeferRazorpayFailure,
@@ -63,6 +64,14 @@ test("only captured Razorpay payments are successful", () => {
     assert.equal(isSuccessfulRazorpayStatus(status), false, status);
   }
   assert.equal(isSuccessfulRazorpayStatus("captured"), true);
+});
+
+test("an order is finalized only after its saved payment status is complete", () => {
+  assert.equal(isRazorpayOrderPaymentComplete("completed"), true);
+  assert.equal(isRazorpayOrderPaymentComplete("paid"), true);
+  for (const status of ["pending", "failed", "unpaid", "partial", null, undefined]) {
+    assert.equal(isRazorpayOrderPaymentComplete(status), false, String(status));
+  }
 });
 
 test("failed Razorpay payments remain recorded without changing paid totals", () => {

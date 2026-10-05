@@ -38,11 +38,16 @@ export function useCreateOrder() {
               }),
             });
             if (finalizeRes.ok) {
-              return await finalizeRes.json() as OrderRequest;
+              const finalizedOrder = await finalizeRes.json() as OrderRequest;
+              if (finalizedOrder.paymentStatus === "completed" || finalizedOrder.paymentStatus === "paid") {
+                return finalizedOrder;
+              }
+              lastError = "Payment was received, but the order is still updating. Please do not pay again; refresh My Orders shortly.";
+            } else {
+              const error = await finalizeRes.json().catch(() => ({}));
+              lastError = error.message || lastError;
+              if (finalizeRes.status < 500) break;
             }
-            const error = await finalizeRes.json().catch(() => ({}));
-            lastError = error.message || lastError;
-            if (finalizeRes.status < 500) break;
           } catch (error: any) {
             lastError = error?.message || lastError;
           }
