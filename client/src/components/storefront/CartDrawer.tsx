@@ -311,6 +311,7 @@ export function CartDrawer() {
   const orderClaimedRef = useRef(false);
   // Mobile UPI return refs — store pending Razorpay order so we can poll when user comes back from GPay
   const pendingRzpOrderIdRef = useRef<string | null>(null);
+  const pendingRzpCancelTokenRef = useRef<string | null>(null);
   const pendingSelectedAddressRef = useRef<any>(null);
   const razorpayInstanceRef = useRef<any>(null);
   const cartStockCheckInFlightRef = useRef(false);
@@ -345,6 +346,50 @@ export function CartDrawer() {
   const [selectedTimeslotId, setSelectedTimeslotId] = useState<string | null>(null);
   const [expandedInstructions, setExpandedInstructions] = useState<Record<number, boolean>>({});
   const [useWallet, setUseWallet] = useState(false);
+  const showRazorpaySuccess = useCallback(() => {
+    orderClaimedRef.current = true;
+    paymentSucceededRef.current = true;
+    razorpayOpenRef.current = false;
+    setIsRazorpayOpen(false);
+    razorpayInstanceRef.current?.close?.();
+    razorpayInstanceRef.current = null;
+    pendingRzpOrderIdRef.current = null;
+    pendingRzpCancelTokenRef.current = null;
+    pendingSelectedAddressRef.current = null;
+    returningFromUpiRef.current = false;
+    setIsCartOpen(true);
+    setIsSuccess(true);
+    clearCart();
+    setUseWallet(false);
+    setIsProcessingPayment(false);
+    window.setTimeout(() => {
+      paymentSucceededRef.current = false;
+    }, 1500);
+  }, [clearCart, setIsCartOpen, setUseWallet]);
+  const requestPendingRazorpayOrderCleanup = useCallback(async (
+    orderId: string | null | undefined,
+    cancelToken: string | null | undefined,
+  ): Promise<"completed" | "processing" | "cancelled" | "unknown"> => {
+    if (!orderId || !cancelToken) return "unknown";
+    try {
+      const response = await fetch("/api/razorpay/cancel-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ razorpayOrderId: orderId, cancelToken }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) return "unknown";
+      if (result.result === "completed") {
+        showRazorpaySuccess();
+        return "completed";
+      }
+      if (result.result === "processing") return "processing";
+      if (result.result === "cancelled") return "cancelled";
+      return "unknown";
+    } catch {
+      return "unknown";
+    }
+  }, [showRazorpaySuccess]);
 
   // Coupon state
   const [couponInput, setCouponInput] = useState("");
@@ -1165,7 +1210,18 @@ export function CartDrawer() {
         setIsCartOpen(true);
         return;
       }
-      const { order_id, amount: rzpAmount, currency } = await res.json();
+      const {
+        order_id,
+        amount: rzpAmount,
+        currency,
+        cancel_token: cancelToken,
+      } = await res.json();
+      if (!order_id || !cancelToken) {
+        throw new Error("The payment session could not be prepared.");
+      }
+      pendingRzpOrderIdRef.current = order_id;
+      pendingRzpCancelTokenRef.current = cancelToken;
+      pendingSelectedAddressRef.current = selected;
 
       // Recheck after the Razorpay order is prepared and immediately before
       // opening its payment UI, closing the small race after the initial tap check.
@@ -1173,6 +1229,10 @@ export function CartDrawer() {
       try {
         latestStock = await checkCheckoutStock(stockCheckItems, selectedSubHub?.dbName);
       } catch (stockError: any) {
+        void requestPendingRazorpayOrderCleanup(order_id, cancelToken);
+        pendingRzpOrderIdRef.current = null;
+        pendingRzpCancelTokenRef.current = null;
+        pendingSelectedAddressRef.current = null;
         toast({
           title: "Could not check current stock",
           description: stockError?.message || "Please try again before paying.",
@@ -1183,6 +1243,10 @@ export function CartDrawer() {
         return;
       }
       if (!latestStock.inStock) {
+        void requestPendingRazorpayOrderCleanup(order_id, cancelToken);
+        pendingRzpOrderIdRef.current = null;
+        pendingRzpCancelTokenRef.current = null;
+        pendingSelectedAddressRef.current = null;
         openStockIssueDialog(latestStock);
         queryClient.invalidateQueries({ queryKey: ["/api/products"] });
         setIsProcessingPayment(false);
@@ -1211,11 +1275,13 @@ export function CartDrawer() {
             return;
           }
           orderClaimedRef.current = true;
+          const cleanupToken = pendingRzpCancelTokenRef.current;
           updateRazorpayOpen(false);
           razorpayInstanceRef.current = null;
           // Mark as succeeded and clear pending UPI refs so the visibilitychange listener doesn't double-process
           paymentSucceededRef.current = true;
           pendingRzpOrderIdRef.current = null;
+          pendingRzpCancelTokenRef.current = null;
           pendingSelectedAddressRef.current = null;
           try {
             const verifyRes = await fetch("/api/razorpay/verify-payment", {
@@ -1230,22 +1296,18 @@ export function CartDrawer() {
             const verifyData = await verifyRes.json();
             if (!verifyData.verified) {
               paymentSucceededRef.current = false;
-              toast({ title: "Payment verification failed. Contact support.", variant: "destructive" });
+              const cleanup = await requestPendingRazorpayOrderCleanup(
+                response.razorpay_order_id,
+                cleanupToken,
+              );
+              if (cleanup !== "completed") {
+                toast({ title: "Payment verification failed. Contact support.", variant: "destructive" });
+              }
               setIsProcessingPayment(false);
               return;
             }
             createOrder({ ...buildOrderPayload(selected, response.razorpay_payment_id), razorpayOrderId: order_id }, {
-              onSuccess: () => {
-                updateRazorpayOpen(false);
-                razorpayInstanceRef.current = null;
-                // Force the drawer open so the success screen is visible
-                setIsCartOpen(true);
-                setIsSuccess(true);
-                clearCart();
-                setUseWallet(false);
-                setIsProcessingPayment(false);
-                paymentSucceededRef.current = false;
-              },
+              onSuccess: showRazorpaySuccess,
               onError: (err: any) => {
                 paymentSucceededRef.current = false;
                 updateRazorpayOpen(false);
@@ -1257,7 +1319,13 @@ export function CartDrawer() {
             });
           } catch {
             paymentSucceededRef.current = false;
-            toast({ title: "Payment failed. Please contact support.", variant: "destructive" });
+            const cleanup = await requestPendingRazorpayOrderCleanup(
+              response.razorpay_order_id,
+              cleanupToken,
+            );
+            if (cleanup !== "completed") {
+              toast({ title: "Payment failed. Please contact support.", variant: "destructive" });
+            }
             setIsProcessingPayment(false);
           }
         },
@@ -1268,11 +1336,20 @@ export function CartDrawer() {
             // Suppress if payment already succeeded OR if we're actively polling after returning from a UPI app
             if (paymentSucceededRef.current || returningFromUpiRef.current) return;
             // User closed the modal — treat as cancellation and reset state
+            const cancelledOrderId = pendingRzpOrderIdRef.current;
+            const cleanupToken = pendingRzpCancelTokenRef.current;
             pendingRzpOrderIdRef.current = null;
+            pendingRzpCancelTokenRef.current = null;
             pendingSelectedAddressRef.current = null;
             setIsProcessingPayment(false);
             setIsCartOpen(true);
-            toast({ title: "Payment cancelled", variant: "destructive" });
+            void requestPendingRazorpayOrderCleanup(cancelledOrderId, cleanupToken).then((result) => {
+              if (result === "processing") {
+                toast({ title: "Payment is still processing. We'll update your order shortly." });
+              } else if (result !== "completed") {
+                toast({ title: "Payment cancelled", variant: "destructive" });
+              }
+            });
           },
         },
         theme: { color: "#364F9F" },
@@ -1281,18 +1358,51 @@ export function CartDrawer() {
       // Store order details before opening so the visibilitychange listener can
       // recover payment completion when the user returns from GPay / PhonePe
       pendingRzpOrderIdRef.current = order_id;
+      pendingRzpCancelTokenRef.current = cancelToken;
       pendingSelectedAddressRef.current = selected;
       orderClaimedRef.current = false;
 
       const rzp = new (window as any).Razorpay(options);
+      rzp.on("payment.failed", () => {
+        const failedOrderId = pendingRzpOrderIdRef.current;
+        const failedCancelToken = pendingRzpCancelTokenRef.current;
+        void requestPendingRazorpayOrderCleanup(failedOrderId, failedCancelToken).then((result) => {
+          if (result === "cancelled") {
+            const instance = razorpayInstanceRef.current;
+            orderClaimedRef.current = true;
+            paymentSucceededRef.current = true;
+            pendingRzpOrderIdRef.current = null;
+            pendingRzpCancelTokenRef.current = null;
+            pendingSelectedAddressRef.current = null;
+            razorpayInstanceRef.current = null;
+            updateRazorpayOpen(false);
+            instance?.close?.();
+            setIsProcessingPayment(false);
+            setIsCartOpen(true);
+            window.setTimeout(() => {
+              paymentSucceededRef.current = false;
+            }, 1500);
+            toast({ title: "Payment failed. You can try again.", variant: "destructive" });
+          } else if (result === "processing") {
+            toast({ title: "Payment is still processing. We'll update your order shortly." });
+          }
+        });
+      });
       razorpayInstanceRef.current = rzp;
       updateRazorpayOpen(true);
       rzp.open();
     } catch {
-      toast({ title: "Payment failed. Please try again.", variant: "destructive" });
+      const cleanup = await requestPendingRazorpayOrderCleanup(
+        pendingRzpOrderIdRef.current,
+        pendingRzpCancelTokenRef.current,
+      );
+      if (cleanup !== "completed") {
+        toast({ title: "Payment failed. Please try again.", variant: "destructive" });
+      }
       updateRazorpayOpen(false);
       razorpayInstanceRef.current = null;
       pendingRzpOrderIdRef.current = null;
+      pendingRzpCancelTokenRef.current = null;
       pendingSelectedAddressRef.current = null;
       setIsProcessingPayment(false);
       setIsCartOpen(true);
@@ -1442,20 +1552,11 @@ export function CartDrawer() {
         orderClaimedRef.current = true;
         paymentSucceededRef.current = true;
         pendingRzpOrderIdRef.current = null;
+        pendingRzpCancelTokenRef.current = null;
         updateRazorpayOpen(false);
 
         createOrder({ ...buildOrderPayload(selected, statusData.paymentId), razorpayOrderId: orderId }, {
-          onSuccess: () => {
-            updateRazorpayOpen(false);
-            razorpayInstanceRef.current = null;
-            setIsCartOpen(true);
-            setIsSuccess(true);
-            clearCart();
-            setUseWallet(false);
-            setIsProcessingPayment(false);
-            paymentSucceededRef.current = false;
-            returningFromUpiRef.current = false;
-          },
+          onSuccess: showRazorpaySuccess,
           onError: (err: any) => {
             paymentSucceededRef.current = false;
             updateRazorpayOpen(false);
@@ -1473,7 +1574,7 @@ export function CartDrawer() {
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [createOrder, buildOrderPayload, clearCart, setIsCartOpen, setUseWallet, toast, isHubReady]);
+  }, [createOrder, buildOrderPayload, clearCart, setIsCartOpen, setUseWallet, toast, isHubReady, showRazorpaySuccess]);
 
   // Safety net: always clear the cart when the success screen is shown,
   // regardless of whether the mutation onSuccess callback fires.

@@ -46,6 +46,9 @@ export default function Orders() {
               const total = Number(order.total ?? items.reduce((sum, item) => sum + (item.price * item.quantity), 0));
               const statusConfig = STATUSES.find(s => s.value === order.status) || STATUSES[0];
               const inventoryReviewRequired = Boolean((order as any).inventoryReviewRequired);
+              const paymentStatus = String(order.paymentStatus ?? "");
+              const paymentPending = paymentStatus === "pending";
+              const paymentCompleted = paymentStatus === "completed" || paymentStatus === "paid";
 
               return (
                 <TableRow key={order.id} className="group">
@@ -56,7 +59,10 @@ export default function Orders() {
                     <div className="font-medium">{order.customerName}</div>
                     <div className="text-xs text-muted-foreground">{order.phone}</div>
                     {order.orderId && <div className="text-xs font-mono text-primary mt-0.5">{order.orderId}</div>}
-                    {order.paymentStatus === "paid" && (
+                    {paymentPending && (
+                      <div className="text-xs font-medium text-amber-700 mt-1">Awaiting UPI payment</div>
+                    )}
+                    {paymentCompleted && (
                       <div className="text-xs font-medium text-emerald-700 mt-1">Paid online</div>
                     )}
                     {inventoryReviewRequired && (
@@ -78,6 +84,7 @@ export default function Orders() {
                   <TableCell className="text-right">
                     <Select 
                       defaultValue={order.status} 
+                      disabled={paymentPending}
                       onValueChange={(val) => updateStatus({ id: order.id, status: val })}
                     >
                       <SelectTrigger className={`w-[140px] h-8 text-xs ml-auto ${statusConfig.color}`}>

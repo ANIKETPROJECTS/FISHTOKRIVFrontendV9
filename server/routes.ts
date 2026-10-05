@@ -20,10 +20,11 @@ import {
   type CheckoutStockLine,
 } from "./checkoutStock";
 import Razorpay from "razorpay";
-import { createHmac } from "crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 import {
   buildSuccessfulRazorpayPaymentState,
   isFtwStorefrontOrder,
+  isRazorpayPaymentInProgress,
   isSuccessfulRazorpayStatus,
   shouldValidatePrePaymentGuards,
 } from "./razorpayPayment";
@@ -36,6 +37,19 @@ declare module "express-session" {
 
 const OTP_TTL_MS = 5 * 60 * 1000;
 const INDIA_TIME_ZONE = "Asia/Kolkata";
+const PENDING_RAZORPAY_ORDER_TTL_MS = 60 * 60 * 1000;
+
+function hashRazorpayCancelToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function isRazorpayCancelTokenValid(token: unknown, storedHash: unknown): boolean {
+  if (typeof token !== "string" || typeof storedHash !== "string") return false;
+  if (!/^[a-f0-9]{64}$/i.test(token) || !/^[a-f0-9]{64}$/i.test(storedHash)) return false;
+  const suppliedHash = Buffer.from(hashRazorpayCancelToken(token), "hex");
+  const expectedHash = Buffer.from(storedHash, "hex");
+  return suppliedHash.length === expectedHash.length && timingSafeEqual(suppliedHash, expectedHash);
+}
 
 function getIndiaDateKey(date = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -817,9 +831,11 @@ export async function registerRoutes(
         currency: "INR",
         receipt: `ft_${Date.now()}`,
       });
+      const cancelToken = randomBytes(32).toString("hex");
 
       // Payment must not be presented to the shopper unless the server has a
-      // durable recovery payload for webhook/reconciliation finalization.
+      // durable recovery payload and a provisional Order document for
+      // webhook/reconciliation finalization.
       try {
         const PendingCheckout = getPendingCheckoutModel();
         await PendingCheckout.findOneAndUpdate(
@@ -835,6 +851,7 @@ export async function registerRoutes(
               finalizationAttempts: 0,
               finalizedOrderId: null,
               lastFinalizationError: null,
+              cancelTokenHash: hashRazorpayCancelToken(cancelToken),
             },
             $setOnInsert: { createdAt: new Date() },
           },
@@ -847,7 +864,64 @@ export async function registerRoutes(
         });
       }
 
-      return res.json({ order_id: order.id, amount: order.amount, currency: order.currency });
+      try {
+        const walletPayments = (Array.isArray(orderPayload.payments) ? orderPayload.payments : [])
+          .filter((payment: any) => payment?.mode === "wallet");
+        const provisionalOrderPayload = {
+          ...orderPayload,
+          paymentStatus: "pending",
+          paymentMode: "upi",
+          upiVariant: null,
+          upiTransactionId: null,
+          paidAmount: 0,
+          dueAmount: Math.max(0, checkoutTotal - walletAmount),
+          payments: [
+            ...walletPayments,
+            { mode: "upi", amount, reference: "" },
+          ],
+          razorpayOrderId: order.id,
+        };
+        const port = process.env.PORT || "5000";
+        const provisionalResponse = await fetch(`http://127.0.0.1:${port}/api/orders`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-FishTokri-Payment-Finalizer": "1",
+            "X-FishTokri-Pending-Payment": "1",
+          },
+          body: JSON.stringify(provisionalOrderPayload),
+        });
+        if (!provisionalResponse.ok) {
+          const details = await provisionalResponse.json().catch(() => ({})) as any;
+          await Promise.allSettled([
+            getPendingCheckoutModel().deleteOne({ razorpayOrderId: order.id }),
+            getOrderModel().deleteOne({ razorpayOrderId: order.id, paymentStatus: "pending" }),
+          ]);
+          console.error(
+            `[Razorpay] Could not create provisional order for ${order.id}:`,
+            details?.message ?? provisionalResponse.status,
+          );
+          return res
+            .status(provisionalResponse.status === 409 ? 409 : 503)
+            .json(details?.message ? details : { message: "Could not safely prepare this payment. Please try again." });
+        }
+      } catch (provisionalOrderErr) {
+        await Promise.allSettled([
+          getPendingCheckoutModel().deleteOne({ razorpayOrderId: order.id }),
+          getOrderModel().deleteOne({ razorpayOrderId: order.id, paymentStatus: "pending" }),
+        ]);
+        console.error("[Razorpay] Failed to create provisional order:", provisionalOrderErr);
+        return res.status(503).json({
+          message: "Could not safely prepare this payment. Please try again.",
+        });
+      }
+
+      return res.json({
+        order_id: order.id,
+        amount: order.amount,
+        currency: order.currency,
+        cancel_token: cancelToken,
+      });
     } catch (err: any) {
       console.error("[Razorpay] create-order error:", err);
       return res.status(500).json({ message: "Failed to create payment order" });
@@ -903,6 +977,34 @@ export async function registerRoutes(
       ],
     }).lean() as Promise<any>;
 
+    const buildVerifiedOrderPayload = (sourcePayload: any) => {
+      const walletPayments = (sourcePayload.payments ?? [])
+        .filter((payment: any) => payment.mode === "wallet");
+      return {
+        ...sourcePayload,
+        razorpayOrderId,
+        ...buildSuccessfulRazorpayPaymentState({
+          total: Number(sourcePayload.total ?? verifiedPayment.amount),
+          paymentAmount: verifiedPayment.amount,
+          paymentId: verifiedPayment.id,
+          existingPayments: walletPayments,
+        }),
+      };
+    };
+
+    const postOrder = (orderPayload: any, allowInventoryReview: boolean) => {
+      const port = process.env.PORT || "5000";
+      return fetch(`http://127.0.0.1:${port}/api/orders`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-FishTokri-Payment-Finalizer": "1",
+          ...(allowInventoryReview ? { "X-FishTokri-Paid-Recovery": "1" } : {}),
+        },
+        body: JSON.stringify(orderPayload),
+      });
+    };
+
     const repairExistingOrder = async (existing: any) => {
       let orderToRepair = existing;
       const latestFinalization = !orderToRepair.orderId
@@ -946,6 +1048,29 @@ export async function registerRoutes(
           throw Object.assign(new Error("The storefront order number is still being assigned."), { statusCode: 503 });
         }
       }
+      if (orderToRepair.paymentStatus === "pending") {
+        const orderPayload = buildVerifiedOrderPayload(pending.orderPayload);
+        let createResponse = await postOrder(orderPayload, false);
+        if (createResponse.status === 409) {
+          const conflict = await createResponse.json().catch(() => ({})) as any;
+          if (conflict.code === "STOCK_UNAVAILABLE") {
+            createResponse = await postOrder(orderPayload, true);
+          } else {
+            throw Object.assign(new Error("Order finalization was rejected."), { statusCode: 503 });
+          }
+        }
+        if (!createResponse.ok) {
+          throw Object.assign(new Error(`Order finalization endpoint returned ${createResponse.status}.`), { statusCode: 503 });
+        }
+        const finalized = await createResponse.json() as any;
+        const savedOrder = await OrderModel.findOne({ razorpayOrderId }).select("orderId").lean() as any;
+        const finalizedOrderId = savedOrder?.orderId ?? finalized.orderId;
+        if (!finalizedOrderId) {
+          throw Object.assign(new Error("The storefront order number has not been saved yet."), { statusCode: 503 });
+        }
+        await markFinalized({ orderId: finalizedOrderId });
+        return finalized;
+      }
       const paymentState = buildSuccessfulRazorpayPaymentState({
         total: Number(orderToRepair.total ?? verifiedPayment.amount),
         paymentAmount: verifiedPayment.amount,
@@ -954,7 +1079,10 @@ export async function registerRoutes(
       });
       const repaired = await OrderModel.findByIdAndUpdate(
         orderToRepair._id,
-        { $set: { ...paymentState, razorpayOrderId, updatedAt: new Date() } },
+        {
+          $set: { ...paymentState, razorpayOrderId, updatedAt: new Date() },
+          $unset: { pendingPaymentExpiresAt: 1 },
+        },
         { new: true },
       ).lean();
       return markFinalized({ ...(repaired ?? orderToRepair), id: String(orderToRepair._id) });
@@ -1009,34 +1137,12 @@ export async function registerRoutes(
     }
 
     try {
-      const walletPayments = (pending.orderPayload.payments ?? [])
-        .filter((payment: any) => payment.mode === "wallet");
-      const orderPayload = {
-        ...pending.orderPayload,
-        razorpayOrderId,
-        ...buildSuccessfulRazorpayPaymentState({
-          total: Number(pending.orderPayload.total ?? verifiedPayment.amount),
-          paymentAmount: verifiedPayment.amount,
-          paymentId: verifiedPayment.id,
-          existingPayments: walletPayments,
-        }),
-      };
-      const port = process.env.PORT || "5000";
-      const postOrder = (allowInventoryReview: boolean) => fetch(`http://127.0.0.1:${port}/api/orders`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-FishTokri-Payment-Finalizer": "1",
-          ...(allowInventoryReview ? { "X-FishTokri-Paid-Recovery": "1" } : {}),
-        },
-        body: JSON.stringify(orderPayload),
-      });
-
-      let createResponse = await postOrder(false);
+      const orderPayload = buildVerifiedOrderPayload(pending.orderPayload);
+      let createResponse = await postOrder(orderPayload, false);
       if (createResponse.status === 409) {
         const conflict = await createResponse.json().catch(() => ({})) as any;
         if (conflict.code === "STOCK_UNAVAILABLE") {
-          createResponse = await postOrder(true);
+          createResponse = await postOrder(orderPayload, true);
         } else {
           throw Object.assign(new Error("Order finalization was rejected."), { statusCode: 503 });
         }
@@ -1084,6 +1190,55 @@ export async function registerRoutes(
       const statusCode = error?.statusCode === 400 || error?.statusCode === 409 ? error.statusCode : 503;
       return res.status(statusCode).json({
         message: error?.message || "Could not finalize payment. It will be retried.",
+      });
+    }
+  });
+
+  app.post("/api/razorpay/cancel-order", async (req, res) => {
+    if (!razorpay) return res.status(503).json({ message: "Payment service not configured" });
+    const razorpayOrderId = String(req.body?.razorpayOrderId ?? "");
+    const cancelToken = req.body?.cancelToken;
+    if (!razorpayOrderId || typeof cancelToken !== "string") {
+      return res.status(400).json({ message: "Razorpay order and cancellation token are required." });
+    }
+
+    try {
+      const pending = await getPendingCheckoutModel().findOne({ razorpayOrderId }).lean() as any;
+      if (!pending || !isRazorpayCancelTokenValid(cancelToken, pending.cancelTokenHash)) {
+        return res.status(404).json({ message: "Pending checkout was not found." });
+      }
+
+      const existingOrder = await getOrderModel().findOne({ razorpayOrderId }).lean() as any;
+      if (["completed", "paid"].includes(String(existingOrder?.paymentStatus))) {
+        return res.json({ result: "completed", order: existingOrder });
+      }
+
+      const payments = await (razorpay as any).orders.fetchPayments(razorpayOrderId);
+      const captured = (payments.items ?? []).find((payment: any) => payment.status === "captured");
+      if (captured?.id) {
+        const finalizedOrder = await finalizeCapturedRazorpayPayment(
+          razorpayOrderId,
+          String(captured.id),
+        );
+        return res.json({ result: "completed", order: finalizedOrder });
+      }
+
+      const paymentInProgress = (payments.items ?? []).some((payment: any) =>
+        isRazorpayPaymentInProgress(payment.status),
+      );
+      if (paymentInProgress) {
+        return res.json({ result: "processing", deleted: false });
+      }
+
+      const deleted = await getOrderModel().deleteOne({
+        razorpayOrderId,
+        paymentStatus: "pending",
+      });
+      return res.json({ result: "cancelled", deleted: deleted.deletedCount > 0 });
+    } catch (error: any) {
+      console.error(`[Razorpay cancel] Could not safely cancel ${razorpayOrderId}:`, error?.message ?? "unknown error");
+      return res.status(503).json({
+        message: "Could not verify the payment state. The pending order will expire automatically.",
       });
     }
   });
@@ -1267,6 +1422,9 @@ export async function registerRoutes(
       const isPaidWebhookRecovery =
         req.headers["x-fishtokri-paid-recovery"] === "1" &&
         isInternalPaymentFinalizer;
+      const isPendingRazorpayCreation =
+        req.headers["x-fishtokri-pending-payment"] === "1" &&
+        isInternalPaymentFinalizer;
       const requestUpiReference =
         (input.payments ?? []).find((payment: any) => payment.mode === "upi" && payment.reference)?.reference ?? null;
 
@@ -1275,23 +1433,41 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Razorpay orders must use the payment finalization endpoint." });
       }
 
+      if (isPendingRazorpayCreation) {
+        if (!input.razorpayOrderId || input.paymentStatus !== "pending" || requestUpiReference) {
+          return res.status(400).json({ message: "Incomplete pending Razorpay order details." });
+        }
+        const pendingCheckout = await getPendingCheckoutModel().findOne({
+          razorpayOrderId: input.razorpayOrderId,
+          finalizationStatus: "pending",
+          autoRecoveryEligible: true,
+        }).select("_id").lean();
+        if (!pendingCheckout) {
+          return res.status(404).json({ message: "The pending checkout recovery record was not found." });
+        }
+      }
+
       let verifiedRazorpayPayment: Awaited<ReturnType<typeof fetchVerifiedRazorpayPayment>> | null = null;
       let inventoryReviewRequired = isPaidWebhookRecovery;
       if (input.razorpayOrderId || requestUpiReference) {
-        if (!input.razorpayOrderId || !requestUpiReference) {
+        if (isPendingRazorpayCreation) {
+          // The internal create-order route is writing the provisional record
+          // before the customer can reach Razorpay; there is no payment ID yet.
+        } else if (!input.razorpayOrderId || !requestUpiReference) {
           return res.status(400).json({ message: "Incomplete Razorpay payment details" });
-        }
-        try {
-          verifiedRazorpayPayment = await fetchVerifiedRazorpayPayment(
-            input.razorpayOrderId,
-            requestUpiReference,
-          );
-        } catch (paymentErr) {
-          console.error("[Razorpay] Payment verification lookup failed:", paymentErr);
-          return res.status(502).json({ message: "Could not verify Razorpay payment" });
-        }
-        if (!verifiedRazorpayPayment) {
-          return res.status(400).json({ message: "Razorpay payment is not captured" });
+        } else {
+          try {
+            verifiedRazorpayPayment = await fetchVerifiedRazorpayPayment(
+              input.razorpayOrderId,
+              requestUpiReference,
+            );
+          } catch (paymentErr) {
+            console.error("[Razorpay] Payment verification lookup failed:", paymentErr);
+            return res.status(502).json({ message: "Could not verify Razorpay payment" });
+          }
+          if (!verifiedRazorpayPayment) {
+            return res.status(400).json({ message: "Razorpay payment is not captured" });
+          }
         }
       }
       const runPrePaymentGuards = shouldValidatePrePaymentGuards(!!verifiedRazorpayPayment);
@@ -1382,6 +1558,7 @@ export async function registerRoutes(
       // submission and return the existing order instead of creating a new one —
       // this is the server-side safety net in case the client-side guard is ever
       // bypassed (double network retry, multiple tabs, etc.).
+      let pendingExistingOrderId: string | null = null;
       const upiReference = (input.payments ?? []).find((p: any) => p.mode === "upi" && p.reference)?.reference;
       if (upiReference) {
         const existing = await getOrderModel().findOne({
@@ -1403,25 +1580,30 @@ export async function registerRoutes(
           }
 
           if (isFtwStorefrontOrder(existing)) {
-            const paymentState = buildSuccessfulRazorpayPaymentState({
-              total: Number(existing.total ?? verifiedPayment.amount),
-              paymentAmount: verifiedPayment.amount,
-              paymentId: verifiedPayment.id,
-              existingPayments: existing.payments,
-            });
-            const repaired = await getOrderModel().findByIdAndUpdate(
-              existing._id,
-              {
-                $set: {
-                  ...paymentState,
-                  razorpayOrderId: verifiedPayment.orderId,
-                  updatedAt: new Date(),
+            if (existing.paymentStatus === "pending") {
+              pendingExistingOrderId = String(existing._id);
+            } else {
+              const paymentState = buildSuccessfulRazorpayPaymentState({
+                total: Number(existing.total ?? verifiedPayment.amount),
+                paymentAmount: verifiedPayment.amount,
+                paymentId: verifiedPayment.id,
+                existingPayments: existing.payments,
+              });
+              const repaired = await getOrderModel().findByIdAndUpdate(
+                existing._id,
+                {
+                  $set: {
+                    ...paymentState,
+                    razorpayOrderId: verifiedPayment.orderId,
+                    updatedAt: new Date(),
+                  },
+                  $unset: { pendingPaymentExpiresAt: 1 },
                 },
-              },
-              { new: true },
-            ).lean();
-            console.log(`[order:dedupe] Repaired FTW payment metadata for ${verifiedPayment.id}`);
-            return res.status(200).json({ ...repaired, id: String(existing._id) });
+                { new: true },
+              ).lean();
+              console.log(`[order:dedupe] Repaired FTW payment metadata for ${verifiedPayment.id}`);
+              return res.status(200).json({ ...repaired, id: String(existing._id) });
+            }
           }
 
           console.warn(`[order:dedupe] Duplicate order-create request for razorpay reference=${upiReference} — returning existing order ${existing.orderId ?? existing._id}`);
@@ -1745,21 +1927,62 @@ export async function registerRoutes(
         razorpayOrderId: verifiedRazorpayPayment?.orderId ?? input.razorpayOrderId ?? null,
       };
 
-      const order = await storage.createOrderRequest(orderInput);
+      if (isPendingRazorpayCreation) {
+        orderInput.pendingPaymentExpiresAt = new Date(Date.now() + PENDING_RAZORPAY_ORDER_TTL_MS);
+      }
 
-      // Generate orderId AFTER the document is saved — countDocuments gives the correct
-      // shared sequence across admin + online orders, and $set appends orderId as the
-      // last field (matching admin POS document structure).
-      const generatedOrderId = await generateOrderId();
-      // orderId and inventoryDeducted are set together in one update AFTER save,
-      // so both appear after createdAt/updatedAt — matching admin POS field order exactly.
-      await getOrderModel().findByIdAndUpdate(order.id, {
-        $set: {
-          orderId: generatedOrderId,
-          inventoryDeducted: false,
-          inventoryReviewRequired,
-        },
-      });
+      const OrderModel = getOrderModel();
+      let order: any;
+      let generatedOrderId: string;
+      if (pendingExistingOrderId) {
+        const updatedPendingOrder = await OrderModel.findOneAndUpdate(
+          { _id: pendingExistingOrderId, paymentStatus: "pending" },
+          {
+            $set: { ...orderInput, updatedAt: new Date() },
+            $unset: { pendingPaymentExpiresAt: 1 },
+          },
+          { new: true },
+        ).lean() as any;
+        if (!updatedPendingOrder) {
+          const existingFinalizedOrder = await storage.getOrderRequest(pendingExistingOrderId);
+          if (["completed", "paid"].includes(String(existingFinalizedOrder?.paymentStatus))) {
+            return res.status(200).json(existingFinalizedOrder);
+          }
+          return res.status(409).json({ message: "The pending order is no longer available to finalize." });
+        }
+
+        generatedOrderId = String(updatedPendingOrder.orderId ?? "");
+        if (!generatedOrderId) {
+          generatedOrderId = await generateOrderId();
+          await OrderModel.findByIdAndUpdate(pendingExistingOrderId, {
+            $set: { orderId: generatedOrderId, inventoryDeducted: false, inventoryReviewRequired },
+          });
+        }
+        order = await storage.getOrderRequest(pendingExistingOrderId);
+        if (!order) throw new Error("The finalized order could not be reloaded.");
+      } else {
+        order = await storage.createOrderRequest(orderInput);
+        // Generate orderId AFTER the document is saved — countDocuments gives the correct
+        // shared sequence across admin + online orders, and $set appends orderId as the
+        // last field (matching admin POS document structure).
+        generatedOrderId = await generateOrderId();
+        // orderId and inventoryDeducted are set together in one update AFTER save,
+        // so both appear after createdAt/updatedAt — matching admin POS field order exactly.
+        await OrderModel.findByIdAndUpdate(order.id, {
+          $set: {
+            orderId: generatedOrderId,
+            inventoryDeducted: false,
+            inventoryReviewRequired,
+          },
+        });
+      }
+
+      // A provisional Razorpay order is intentionally visible in MongoDB, but it
+      // must not be presented as a placed/paid order to the customer or downstream
+      // systems until the capture has been verified.
+      if (isPendingRazorpayCreation) {
+        return res.status(201).json(order);
+      }
 
       const orderItemsTotal = (order.items as any[]).reduce((sum: number, item: any) => {
         return sum + ((item.price ?? 0) * (item.quantity ?? 1));

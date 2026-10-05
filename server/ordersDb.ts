@@ -76,6 +76,7 @@ const orderSchema = new mongoose.Schema(
     inventoryReviewRequired: { type: Boolean, default: false },
     upiTransactionId: { type: String, default: null },
     razorpayOrderId: { type: String, default: null },
+    pendingPaymentExpiresAt: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
     orderId: { type: String },
@@ -89,6 +90,14 @@ orderSchema.index(
     unique: true,
     partialFilterExpression: { razorpayOrderId: { $type: "string" } },
     name: "uniq_razorpay_order_id",
+  },
+);
+orderSchema.index(
+  { pendingPaymentExpiresAt: 1 },
+  {
+    expireAfterSeconds: 0,
+    partialFilterExpression: { paymentStatus: "pending" },
+    name: "expire_pending_razorpay_orders",
   },
 );
 
@@ -118,6 +127,7 @@ export function getOrderModel() {
 const pendingCheckoutSchema = new mongoose.Schema(
   {
     razorpayOrderId: { type: String, required: true, unique: true, index: true },
+    cancelTokenHash: { type: String, default: null },
     orderPayload: { type: mongoose.Schema.Types.Mixed, required: true },
     amountPaise: { type: Number, default: null },
     currency: { type: String, default: "INR" },

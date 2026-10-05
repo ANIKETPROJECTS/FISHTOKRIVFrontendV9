@@ -39,7 +39,7 @@ export function buildSuccessfulRazorpayPaymentState({
     source: "online",
     paymentMode: "upi",
     upiVariant: "RZPAY",
-    paymentStatus: "paid",
+    paymentStatus: "completed",
     payments: [
       ...walletPayments,
       {
@@ -57,6 +57,10 @@ export function buildSuccessfulRazorpayPaymentState({
 
 export function isSuccessfulRazorpayStatus(status: unknown): boolean {
   return status === "captured";
+}
+
+export function isRazorpayPaymentInProgress(status: unknown): boolean {
+  return ["authorized", "authorized_pending", "pending", "processing"].includes(String(status));
 }
 
 export function shouldValidatePrePaymentGuards(hasCapturedPayment: boolean): boolean {

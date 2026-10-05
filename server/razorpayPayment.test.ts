@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildSuccessfulRazorpayPaymentState,
   isFtwStorefrontOrder,
+  isRazorpayPaymentInProgress,
   isSuccessfulRazorpayStatus,
   shouldValidatePrePaymentGuards,
 } from "./razorpayPayment";
@@ -23,7 +24,7 @@ test("successful Razorpay payments are fully paid for every delivery date/slot",
       paymentId: `pay_${deliveryDate}_${slot.replace(/\W/g, "_")}`,
     });
 
-    assert.equal(state.paymentStatus, "paid", `${deliveryDate}/${slot}`);
+    assert.equal(state.paymentStatus, "completed", `${deliveryDate}/${slot}`);
     assert.equal(state.paidAmount, 1249);
     assert.equal(state.dueAmount, 0);
     assert.equal(state.upiVariant, "RZPAY");
@@ -41,7 +42,7 @@ test("wallet plus Razorpay payment remains fully paid", () => {
     ],
   });
 
-  assert.equal(state.paymentStatus, "paid");
+  assert.equal(state.paymentStatus, "completed");
   assert.equal(state.paidAmount, 1249);
   assert.equal(state.dueAmount, 0);
   assert.deepEqual(
@@ -58,6 +59,15 @@ test("only captured Razorpay payments are successful", () => {
     assert.equal(isSuccessfulRazorpayStatus(status), false, status);
   }
   assert.equal(isSuccessfulRazorpayStatus("captured"), true);
+});
+
+test("cancelled and failed attempts are not treated as in-progress payments", () => {
+  for (const status of ["created", "failed", "cancelled", "captured", "refunded"]) {
+    assert.equal(isRazorpayPaymentInProgress(status), false, status);
+  }
+  for (const status of ["authorized", "authorized_pending", "pending", "processing"]) {
+    assert.equal(isRazorpayPaymentInProgress(status), true, status);
+  }
 });
 
 test("pre-payment guards stop re-running after verified capture", () => {

@@ -288,8 +288,9 @@ const FISHTOKRI_LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 3
 function downloadInvoicePDF(order: OrderRequest, items: OrderItem[], subtotal: number, slotCharge: number, discount: number, total: number, date: string) {
   const orderId = getDisplayOrderId(order);
   const paymentStatusVal = (order as any).paymentStatus ?? "unpaid";
-  const isPaid = paymentStatusVal === "paid";
+  const isPaid = paymentStatusVal === "paid" || paymentStatusVal === "completed";
   const isPartial = paymentStatusVal === "partial";
+  const isPaymentPending = paymentStatusVal === "pending";
   const couponCode = (order as any).coupon?.code ?? "";
   const couponDiscount = (order as any).coupon?.discountAmount ?? 0;
   const extraDiscount = Math.max(0, discount - couponDiscount);
@@ -306,8 +307,8 @@ function downloadInvoicePDF(order: OrderRequest, items: OrderItem[], subtotal: n
   const modes = payments.length > 0 ? [...new Set(payments.map(p => p.mode))] : [(order as any).paymentMethod ?? "cash"];
   const paymentMethod = (modes as string[]).map(m => m === "wallet" ? "Wallet Balance" : m === "upi" ? "UPI" : "Cash on Delivery").join(" + ");
 
-  const statusLabel = isPaid ? "Paid" : isPartial ? "Partial" : "Unpaid";
-  const statusColor = isPaid ? "#22c55e" : isPartial ? "#f59e0b" : "#ef4444";
+  const statusLabel = isPaid ? "Paid" : isPartial ? "Partial" : isPaymentPending ? "Payment pending" : "Unpaid";
+  const statusColor = isPaid ? "#22c55e" : isPartial || isPaymentPending ? "#f59e0b" : "#ef4444";
 
   const itemRows = items.map(item => `
     <tr>
@@ -637,12 +638,13 @@ function OrderCard({ order, productImageMap }: { order: OrderRequest; productIma
               const orderPayments: Array<{ mode: string; amount: number }> = (order as any).payments ?? [];
               const walletPaidAmt = orderPayments.filter(p => p.mode === "wallet").reduce((s, p) => s + (Number.isFinite(p.amount) ? p.amount : 0), 0);
               const paymentStatusVal = (order as any).paymentStatus ?? "unpaid";
-              const isPaidVal = paymentStatusVal === "paid";
+              const isPaidVal = paymentStatusVal === "paid" || paymentStatusVal === "completed";
               const isPartialVal = paymentStatusVal === "partial";
+              const isPaymentPending = paymentStatusVal === "pending";
               const paymentModes = orderPayments.length > 0 ? [...new Set(orderPayments.map(p => p.mode))] : [(order as any).paymentMethod ?? "cash"];
               const paymentMethodText = (paymentModes as string[]).map(m => m === "wallet" ? "Wallet Balance" : m === "upi" ? "UPI" : "Cash on Delivery").join(" + ");
-              const statusBg = isPaidVal ? "bg-green-500" : isPartialVal ? "bg-amber-500" : "bg-red-500";
-              const statusLabel = isPaidVal ? "Paid" : isPartialVal ? "Partial" : "Unpaid";
+              const statusBg = isPaidVal ? "bg-green-500" : isPartialVal || isPaymentPending ? "bg-amber-500" : "bg-red-500";
+              const statusLabel = isPaidVal ? "Paid" : isPartialVal ? "Partial" : isPaymentPending ? "Payment pending" : "Unpaid";
               return (
                 <>
                   <div className="space-y-1.5 pt-1">
