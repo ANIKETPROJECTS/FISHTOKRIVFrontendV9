@@ -415,7 +415,7 @@ export function CartDrawer() {
   const [couponInput, setCouponInput] = useState("");
   const [couponError, setCouponError] = useState("");
   const [showAllCoupons, setShowAllCoupons] = useState(false);
-  const [couponExpanded, setCouponExpanded] = useState(false);
+  const [couponExpanded, setCouponExpanded] = useState(true);
   const [timeslotExpanded, setTimeslotExpanded] = useState(false);
   const [isNextDay, setIsNextDay] = useState(false);
   const [selectedDeliveryDate, setSelectedDeliveryDate] = useState<Date>(startOfTomorrow);
@@ -1917,6 +1917,7 @@ export function CartDrawer() {
                           type="button"
                           onClick={() => setCouponExpanded(s => !s)}
                           className="w-full flex items-center gap-2.5 px-4 py-3 bg-muted/20 hover:bg-muted/30 transition-colors"
+                          aria-expanded={couponExpanded}
                           data-testid="button-toggle-coupons"
                         >
                           <span
@@ -2076,7 +2077,7 @@ export function CartDrawer() {
                                       const isThisApplying = applyingCouponId === coupon.id;
                                       return (
                                         <button
-                                          onClick={() => { if (applicable && !isApplied && !isApplyingCoupon) { applyCartCoupon(coupon).then(() => setCouponExpanded(false)); } }}
+                                          onClick={() => { if (applicable && !isApplied && !isApplyingCoupon) { applyCartCoupon(coupon); } }}
                                           disabled={!applicable || isApplied || isApplyingCoupon || exhausted}
                                           className={`ml-3 shrink-0 text-xs font-bold px-3.5 py-1.5 rounded-full transition-colors flex items-center gap-1 ${
                                             isApplied
