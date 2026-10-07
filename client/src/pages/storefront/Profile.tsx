@@ -52,6 +52,7 @@ import { OtpModal } from "@/components/storefront/OtpModal";
 import { CartDrawer } from "@/components/storefront/CartDrawer";
 import { apiRequest } from "@/lib/queryClient";
 import type { Customer, CustomerAddress, OrderRequest, Product } from "@shared/schema";
+import { isCustomerOrderVisible } from "@shared/customerOrderVisibility";
 import fishImg from "@assets/Gemini_Generated_Image_w6wqkkw6wqkkw6wq_(1)_1772713077919.png";
 import prawnsImg from "@assets/Gemini_Generated_Image_5xy0sd5xy0sd5xy0_1772713090650.png";
 import chickenImg from "@assets/Gemini_Generated_Image_g0ecb4g0ecb4g0ec_1772713219972.png";
@@ -921,8 +922,9 @@ export default function Profile() {
     return map;
   }, [products]);
 
-  const currentOrders = useMemo(() => orders.filter(o => ["pending", "confirmed", "out_for_delivery"].includes(o.status)), [orders]);
-  const previousOrders = useMemo(() => orders.filter(o => ["delivered", "cancelled"].includes(o.status)), [orders]);
+  const customerVisibleOrders = useMemo(() => orders.filter(isCustomerOrderVisible), [orders]);
+  const currentOrders = useMemo(() => customerVisibleOrders.filter(o => ["pending", "confirmed", "out_for_delivery"].includes(o.status)), [customerVisibleOrders]);
+  const previousOrders = useMemo(() => customerVisibleOrders.filter(o => ["delivered", "cancelled"].includes(o.status)), [customerVisibleOrders]);
 
   const activeOrders = ordersSubTab === "current" ? currentOrders : previousOrders;
   const filteredOrders = useMemo(() => applySorting(applyFilters(activeOrders, filters), sort), [activeOrders, filters, sort]);

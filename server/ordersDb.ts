@@ -51,6 +51,7 @@ const orderSchema = new mongoose.Schema(
     pickupLocation: { type: String, default: "" },
     notes: { type: String, default: "" },
     status: { type: String, default: "pending" },
+    isDeleted: { type: Boolean },
     source: { type: String, default: "online" },
     subHubId: { type: String, default: null },
     subHubName: { type: String, default: null },

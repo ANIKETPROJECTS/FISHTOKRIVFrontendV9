@@ -162,6 +162,7 @@ export type OrderRequest = {
   address: string;
   items: OrderItem[];
   status: string;
+  isDeleted?: boolean;
   notes: string | null;
   createdAt: Date;
   deliveryType?: string | null;

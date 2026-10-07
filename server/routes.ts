@@ -3187,7 +3187,7 @@ export async function registerRoutes(
       // delivery address may intentionally have a different recipient phone,
       // but its order must remain visible in the same account history.
       const customer = await CustomerDbModel.findOne({ phone }).select("_id").lean() as any;
-      const orders = await storage.getOrdersByPhone(phone, customer?._id?.toString() ?? null);
+      const orders = await storage.getCustomerOrdersByPhone(phone, customer?._id?.toString() ?? null);
 
       // Enrich order items that are missing imageUrl by looking up the product
       // in the hub's products collection using subHubName + productId.

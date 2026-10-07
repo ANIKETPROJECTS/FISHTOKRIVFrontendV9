@@ -1,6 +1,7 @@
 import { UserModel } from "./adminDb";
 import { getOrderModel } from "./ordersDb";
 import { CustomerDbModel } from "./customerDb";
+import { buildCustomerOrdersQuery } from "./customerOrderQuery";
 import type {
   User,
   InsertUser,
@@ -125,6 +126,7 @@ export interface IStorage {
 
   getOrderRequests(): Promise<OrderRequest[]>;
   getOrdersByPhone(phone: string, customerId?: string | null): Promise<OrderRequest[]>;
+  getCustomerOrdersByPhone(phone: string, customerId?: string | null): Promise<OrderRequest[]>;
   getOrderRequest(id: string): Promise<OrderRequest | undefined>;
   createOrderRequest(order: InsertOrderRequest): Promise<OrderRequest>;
   updateOrderRequestStatus(id: string, status: string): Promise<OrderRequest | undefined>;
@@ -168,6 +170,17 @@ export class MongoStorage implements IStorage {
     const query = filters.length === 1 ? filters[0] : { $or: filters };
     const docs = await getOrderModel().find(query).sort({ createdAt: -1 }).lean();
     return docs.map(toOrder);
+  }
+
+  async getCustomerOrdersByPhone(phone: string, customerId?: string | null): Promise<OrderRequest[]> {
+    const docs = await getOrderModel()
+      .find(buildCustomerOrdersQuery(phone, customerId))
+      .sort({ createdAt: -1 })
+      .lean();
+    return docs.map((doc: any) => ({
+      ...toOrder(doc),
+      ...(typeof doc.isDeleted === "boolean" ? { isDeleted: doc.isDeleted } : {}),
+    }));
   }
 
   async getOrderRequest(id: string): Promise<OrderRequest | undefined> {
