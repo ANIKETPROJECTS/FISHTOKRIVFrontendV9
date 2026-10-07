@@ -2,6 +2,7 @@
 - [Timeslots are DB-only](timeslots-db-only.md) — no auto-seeding, no hardcoded NEXT_DAY slot; admin adds all timeslots from panel; isInstant handled by timeslot doc's isInstant field.
 - [Expired batch handling](expired-batches.md) — toProduct checks BOTH `inventoryBatches` (this app) AND `batches` (external admin) for expiry; if all batches across both arrays are expired → batchExpired=true, status→"unavailable".
 - [Order schema strips unknown fields](order-schema-zod.md) — new order payload fields MUST be added to insertOrderRequestSchema in shared/schema.ts or Zod silently drops them before the route handler sees them.
+- [Customer order soft-delete visibility](customer-order-soft-delete.md) — Hide isDeleted:true only from customer My Orders; keep admin deleted-order and restore flows unchanged.
 - [.replit userenv secrets exposure](dotreplit-secrets-check.md) — check .replit's [userenv.shared] for committed plaintext credentials during import setup; migrate to Secrets/env vars and rewrite via verifyAndReplaceDotReplit.
 - [Delivery charge checkout race](delivery-charge-race.md) — checkout must gate submit on `isHubReady`; async pincode-config fetch can otherwise let a ₹0 charge slip through.
 - [Razorpay payment recovery](razorpay-webhook.md) — Only captured payments complete orders; never acknowledge finalization until Mongo shows completed/paid.
