@@ -332,37 +332,13 @@ export async function registerRoutes(
       if (superHubId) filter.superHubId = superHubId;
       const hubs = await SubHubModel.find(filter).lean();
       const response = await Promise.all(hubs.map(async (h: any) => {
-        const adminPincodes = h.pincodes ?? [];
-        let legacyPincodes: any[] = [];
-        // Some admin service-area edits are stored in the hub-local collection.
-        // Merge both sources so new legacy entries remain visible even when the
-        // SubHub document already has older pincode records. Admin values win
-        // for duplicate pincodes.
-        if (h.dbName) {
-          try {
-            const hub = await getHubModels(h.dbName);
-            legacyPincodes = await hub.Pincode.find({ isActive: { $ne: false } }).lean();
-          } catch (err) {
-            console.warn(`[hubs/sub] Could not read legacy pincodes for ${h.dbName}:`, err);
-          }
-        }
+        if (!h.dbName) throw new Error(`Sub-hub ${h.name} is missing its database name`);
+        const hub = await getHubModels(h.dbName);
+        const pincodeRecords = await hub.Pincode.find({ isActive: { $ne: false } }).lean();
         const pincodeByValue = new Map<string, any>();
-        for (const p of legacyPincodes) {
-          const normalized = normalizePincode(p?.pincode);
-          if (normalized) pincodeByValue.set(normalized, p);
-        }
-        for (const p of adminPincodes) {
-          const normalized = normalizePincode(typeof p === "string" ? p : p?.pincode);
-          if (!normalized) continue;
-          const legacy = pincodeByValue.get(normalized);
-          const adminEntry = typeof p === "string" ? { pincode: p } : p;
-          pincodeByValue.set(normalized, {
-            ...legacy,
-            ...adminEntry,
-            pincode: normalized,
-            charge: adminEntry.charge ?? legacy?.charge ?? 0,
-            timeDelay: adminEntry.timeDelay ?? legacy?.timeDelay ?? 0,
-          });
+        for (const entry of pincodeRecords) {
+          const normalized = normalizePincode(entry?.pincode);
+          if (normalized) pincodeByValue.set(normalized, entry);
         }
         return ({
         id: h._id.toString(),
@@ -2161,28 +2137,23 @@ export async function registerRoutes(
       // in-memory hub/pincode config (via React state that can be stale — e.g. a UPI
       // payment resumed long after checkout via the visibilitychange listener replays an
       // old/empty closure). Never trust the client's number outright for a delivery order;
-      // recompute it here from the persisted sub-hub pincode config + timeslot doc and use
+      // recompute it here from the hub database's pincodes collection + timeslot doc and use
       // that value, only falling back to the client-submitted figure if lookup is impossible
       // (e.g. pickup/takeaway orders with no hub, or a legacy pincode not in the config yet).
       let slotCharge = clientSlotCharge;
       if (!verifiedRazorpayPayment && input.hubDbName && (input.deliveryType ?? "delivery") === "delivery") {
         try {
           const pincode = input.deliveryAddressDetail?.pincode;
-          const subHubForCharge = await SubHubModel.findOne({ dbName: input.hubDbName }).lean() as any;
-           let pincodeConfig = pincode
-              ? (subHubForCharge?.pincodes ?? []).find((p: any) =>
-                  normalizePincode(p.pincode) === normalizePincode(pincode)
-                )
-             : null;
-           if (!pincodeConfig && input.hubDbName && pincode) {
-             const hubForPincode = await getHubModels(input.hubDbName);
-              const hubPincodes = await hubForPincode.Pincode.find({
-                isActive: { $ne: false },
-              }).lean() as any[];
-              pincodeConfig = hubPincodes.find((entry) =>
-                normalizePincode(entry.pincode) === normalizePincode(pincode)
-              ) ?? null;
-           }
+          let pincodeConfig = null;
+          if (pincode) {
+            const hubForPincode = await getHubModels(input.hubDbName);
+            const hubPincodes = await hubForPincode.Pincode.find({
+              isActive: { $ne: false },
+            }).lean() as any[];
+            pincodeConfig = hubPincodes.find((entry) =>
+              normalizePincode(entry.pincode) === normalizePincode(pincode)
+            ) ?? null;
+          }
           if (!pincodeConfig) {
             // No authoritative config found (unknown pincode, hub/dbName mismatch, or missing
             // pincode on the order) — we silently keep the client-submitted slotCharge below.
@@ -2190,7 +2161,7 @@ export async function registerRoutes(
             // immediately rather than being discovered later as missing revenue.
             console.warn(
               `[order:slotCharge] No pincode config match — keeping client-submitted slotCharge=${clientSlotCharge} ` +
-              `(pincode=${pincode}, hub=${input.hubDbName}, foundSubHub=${!!subHubForCharge})`
+              `(pincode=${pincode}, hub=${input.hubDbName})`
             );
           }
           if (pincodeConfig) {

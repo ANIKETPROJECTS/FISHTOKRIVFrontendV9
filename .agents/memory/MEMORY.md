@@ -15,3 +15,4 @@
 - [Production hosting](production-hosting.md) — fishtokri.com runs on the user's VPS, so Replit publishing does not update the live storefront.
 - [Combo page search visibility](combo-search-visibility.md) — /combos stays available on-site but is intentionally noindexed and excluded from the sitemap.
 - [Keep checkout helpers isolated](checkout-helper-imports.md) — stock calculations used by tests should not import DB-connected sync modules.
+- [Pincode source of truth](pincode-source.md) — storefront serviceability and delivery charges must read the selected hub's MongoDB `pincodes` collection.
