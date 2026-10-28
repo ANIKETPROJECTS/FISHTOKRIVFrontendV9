@@ -1,5 +1,6 @@
-import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from "react";
 import { setActiveHubDb, queryClient } from "@/lib/queryClient";
+import { normalizePincode } from "@shared/pincode";
 
 export interface SuperHub {
   id: string;
@@ -89,6 +90,7 @@ export function HubProvider({ children }: { children: ReactNode }) {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isPickerRequired, setIsPickerRequired] = useState(false);
   const [isHubReady, setIsHubReady] = useState(false);
+  const lastHubRefreshAt = useRef(0);
 
   useEffect(() => {
     const init = async () => {
@@ -109,11 +111,15 @@ export function HubProvider({ children }: { children: ReactNode }) {
           // Always re-fetch fresh sub-hub data in the background so newly added
           // pincodes, charges, or time delays are picked up without clearing cache
           try {
-            const subRes = await fetch(`/api/hubs/sub?superHubId=${superHub.id}`);
+            const subRes = await fetch(`/api/hubs/sub?superHubId=${superHub.id}`, { cache: "no-store" });
             if (subRes.ok) {
               const freshSubHubs: SubHub[] = await subRes.json();
               const freshSubHub = freshSubHubs.find((h) => h.id === subHub.id) ?? null;
               if (freshSubHub) {
+                freshSubHub.pincodes = (freshSubHub.pincodes ?? []).map((entry) => ({
+                  ...entry,
+                  pincode: normalizePincode(entry.pincode),
+                }));
                 setSelectedSubHub(freshSubHub);
                 localStorage.setItem(STORAGE_KEY, JSON.stringify({ superHub, subHub: freshSubHub }));
               }
@@ -141,6 +147,47 @@ export function HubProvider({ children }: { children: ReactNode }) {
 
     init();
   }, []);
+
+  // A storefront tab can remain open while an admin changes service areas. Refresh
+  // the selected hub when the customer returns so charges/delays use current config.
+  useEffect(() => {
+    if (!selectedSuperHub || !selectedSubHub) return;
+
+    const refreshSelectedHub = async () => {
+      if (document.visibilityState === "hidden" || Date.now() - lastHubRefreshAt.current < 3000) return;
+      lastHubRefreshAt.current = Date.now();
+      try {
+        const response = await fetch(
+          `/api/hubs/sub?superHubId=${encodeURIComponent(selectedSuperHub.id)}`,
+          { cache: "no-store", credentials: "include" },
+        );
+        if (!response.ok) return;
+        const hubs: SubHub[] = await response.json();
+        const freshHub = hubs.find((hub) => hub.id === selectedSubHub.id);
+        if (!freshHub) return;
+
+        // Normalize legacy values while retaining the server's charge/delay values.
+        freshHub.pincodes = (freshHub.pincodes ?? []).map((entry) => ({
+          ...entry,
+          pincode: normalizePincode(entry.pincode),
+        }));
+        setSelectedSubHub(freshHub);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          superHub: selectedSuperHub,
+          subHub: freshHub,
+        }));
+      } catch {
+        // Keep the last known hub config if a transient refresh fails.
+      }
+    };
+
+    window.addEventListener("focus", refreshSelectedHub);
+    document.addEventListener("visibilitychange", refreshSelectedHub);
+    return () => {
+      window.removeEventListener("focus", refreshSelectedHub);
+      document.removeEventListener("visibilitychange", refreshSelectedHub);
+    };
+  }, [selectedSuperHub, selectedSubHub?.id]);
 
   const setHub = useCallback((superHub: SuperHub, subHub: SubHub) => {
     setSelectedSuperHub(superHub);

@@ -30,6 +30,7 @@ import { useCreateOrder } from "@/hooks/use-orders";
 import { useProducts } from "@/hooks/use-products";
 import { useCustomer } from "@/context/CustomerContext";
 import { useHub } from "@/context/HubContext";
+import { normalizePincode } from "@shared/pincode";
 import { useCoupons } from "@/hooks/use-coupons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getHubHeaders } from "@/lib/queryClient";
@@ -795,11 +796,11 @@ export function CartDrawer() {
   const pincodeConfig = useMemo(() => {
     if (!selectedSubHub?.pincodes?.length) return null;
     if (showAddForm && addForm.pincode.length === 6) {
-      return selectedSubHub.pincodes.find(p => p.pincode === addForm.pincode) ?? null;
+      return selectedSubHub.pincodes.find(p => normalizePincode(p.pincode) === normalizePincode(addForm.pincode)) ?? null;
     }
     const selected = savedAddresses.find(a => a.id === activeAddressId);
     if (!selected?.pincode) return null;
-    return selectedSubHub.pincodes.find(p => p.pincode === selected.pincode) ?? null;
+    return selectedSubHub.pincodes.find(p => normalizePincode(p.pincode) === normalizePincode(selected.pincode)) ?? null;
   }, [activeAddressId, savedAddresses, selectedSubHub, showAddForm, addForm.pincode]);
 
   const pincodeDeliveryCharge = pincodeConfig?.charge ?? 0;
@@ -808,7 +809,7 @@ export function CartDrawer() {
   // Helper: check if a pincode is unserviceable in the current hub
   const checkPincodeServiceability = useCallback((pincode: string): boolean => {
     if (pincode.length < 6 || !selectedSubHub?.pincodes?.length) return true;
-    return !!selectedSubHub.pincodes.find(p => p.pincode === pincode);
+    return !!selectedSubHub.pincodes.find(p => normalizePincode(p.pincode) === normalizePincode(pincode));
   }, [selectedSubHub]);
 
   // Show popup when switching between existing saved addresses with unserviceable pincodes
@@ -816,7 +817,7 @@ export function CartDrawer() {
     const selected = savedAddresses.find(a => a.id === activeAddressId);
     if (!selected?.pincode || selected.pincode.length < 6) return;
     if (!selectedSubHub?.pincodes?.length) return;
-    const matched = selectedSubHub.pincodes.find(p => p.pincode === selected.pincode);
+    const matched = selectedSubHub.pincodes.find(p => normalizePincode(p.pincode) === normalizePincode(selected.pincode));
     if (!matched) {
       setUnserviceablePincode(selected.pincode);
       setShowUnserviceablePopup(true);

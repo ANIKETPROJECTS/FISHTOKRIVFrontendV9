@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, Loader2, ArrowLeft, X } from "lucide-react";
 import { useHub, SuperHub, SubHub } from "@/context/HubContext";
+import { normalizePincode, isValidIndianPincode } from "@shared/pincode";
 import Lottie from "lottie-react";
 import deliveryAnim from "@assets/animation-original_(21)_1779949238004.json";
 import whatsappIcon from "@assets/logo_(16)_1779950540352.png";
@@ -72,12 +73,12 @@ export function LocationPicker() {
   }, []);
 
   const handleCheck = useCallback(() => {
-    const clean = pincode.replace(/\s/g, "");
-    if (clean.length !== 6) return;
+    const clean = normalizePincode(pincode);
+    if (!isValidIndianPincode(clean)) return;
     setStatus("checking");
 
     const matchedSub = allSubHubs.find((sub) =>
-      sub.pincodes.some((p) => p.pincode.replace(/\s/g, "") === clean)
+      sub.pincodes.some((p) => normalizePincode(p.pincode) === clean)
     );
 
     setTimeout(() => {
