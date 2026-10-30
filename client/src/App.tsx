@@ -1,5 +1,5 @@
 import { Switch, Route, useLocation } from "wouter";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { HelmetProvider } from "react-helmet-async";
@@ -24,12 +24,26 @@ import Products from "@/pages/admin/Products";
 import Orders from "@/pages/admin/Orders";
 import SectionsAdmin from "@/pages/admin/Sections";
 import AdminLayout from "@/components/admin/AdminLayout";
+import { trackMetaEvent } from "@/lib/metaPixel";
 
 function ScrollToTop() {
   const [location] = useLocation();
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: "instant" });
   }, [location]);
+  return null;
+}
+
+function MetaPixelPageViews() {
+  const [location] = useLocation();
+  const previousLocation = useRef(location);
+
+  useEffect(() => {
+    if (previousLocation.current === location) return;
+    previousLocation.current = location;
+    trackMetaEvent("PageView");
+  }, [location]);
+
   return null;
 }
 
@@ -82,6 +96,7 @@ function App() {
             <TooltipProvider>
               <Toaster />
               <ScrollToTop />
+              <MetaPixelPageViews />
               <Router />
             </TooltipProvider>
           </CartProvider>

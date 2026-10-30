@@ -31,6 +31,7 @@ import { useProducts } from "@/hooks/use-products";
 import { useCustomer } from "@/context/CustomerContext";
 import { useHub } from "@/context/HubContext";
 import { normalizePincode } from "@shared/pincode";
+import { trackMetaCommerceEvent } from "@/lib/metaPixel";
 import { useCoupons } from "@/hooks/use-coupons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getHubHeaders } from "@/lib/queryClient";
@@ -315,8 +316,35 @@ export function CartDrawer() {
   const pendingRzpCancelTokenRef = useRef<string | null>(null);
   const pendingSelectedAddressRef = useRef<any>(null);
   const razorpayInstanceRef = useRef<any>(null);
+  const purchaseMetaDataRef = useRef({ items, value: 0 });
+  const trackedPurchaseIdsRef = useRef(new Set<string>());
+  const purchaseWithoutIdTrackedRef = useRef(false);
   const cartStockCheckInFlightRef = useRef(false);
   const returningFromUpiRef = useRef(false);
+  const trackConfirmedPurchase = useCallback((order?: any) => {
+    const transactionId = order?.id != null
+      ? String(order.id)
+      : pendingRzpOrderIdRef.current ?? undefined;
+    if (transactionId) {
+      if (trackedPurchaseIdsRef.current.has(transactionId)) return;
+      trackedPurchaseIdsRef.current.add(transactionId);
+    } else {
+      if (purchaseWithoutIdTrackedRef.current) return;
+      purchaseWithoutIdTrackedRef.current = true;
+    }
+
+    const purchase = purchaseMetaDataRef.current;
+    trackMetaCommerceEvent(
+      "Purchase",
+      Number(order?.total ?? purchase.value),
+      purchase.items.map((item) => ({
+        id: item.originalId ?? item.id,
+        quantity: item.quantity,
+        price: Number(item.price) || 0,
+      })),
+      transactionId,
+    );
+  }, []);
   const openStockIssueDialog = (result: StockCheckResult) => {
     const rows = getCartStockIssueRows(items, result);
     setCartStockWarnings(
@@ -347,7 +375,8 @@ export function CartDrawer() {
   const [selectedTimeslotId, setSelectedTimeslotId] = useState<string | null>(null);
   const [expandedInstructions, setExpandedInstructions] = useState<Record<number, boolean>>({});
   const [useWallet, setUseWallet] = useState(false);
-  const showRazorpaySuccess = useCallback(() => {
+  const showRazorpaySuccess = useCallback((order?: any) => {
+    trackConfirmedPurchase(order);
     orderClaimedRef.current = true;
     paymentSucceededRef.current = true;
     razorpayOpenRef.current = false;
@@ -366,7 +395,7 @@ export function CartDrawer() {
     window.setTimeout(() => {
       paymentSucceededRef.current = false;
     }, 1500);
-  }, [clearCart, setIsCartOpen, setUseWallet]);
+  }, [clearCart, setIsCartOpen, setUseWallet, trackConfirmedPurchase]);
   const requestPendingRazorpayOrderCleanup = useCallback(async (
     orderId: string | null | undefined,
     cancelToken: string | null | undefined,
@@ -977,6 +1006,7 @@ export function CartDrawer() {
   const afterCouponTotal = rawTotal - discountAmount;
   const walletDeduction = useWallet ? Math.min(walletBalance, afterCouponTotal) : 0;
   const finalTotal = afterCouponTotal - walletDeduction;
+  purchaseMetaDataRef.current = { items, value: afterCouponTotal };
 
   const loadRazorpayScript = (): Promise<boolean> => {
     return new Promise((resolve) => {
@@ -1162,10 +1192,25 @@ export function CartDrawer() {
       return;
     }
 
+    trackMetaCommerceEvent(
+      "InitiateCheckout",
+      afterCouponTotal,
+      items.map((item) => ({
+        id: item.originalId ?? item.id,
+        quantity: item.quantity,
+        price: Number(item.price) || 0,
+      })),
+    );
+
     // Wallet covers entire total — place order directly, no payment method needed
     if (finalTotal === 0) {
       createOrder(buildOrderPayload(selected), {
-        onSuccess: () => { setIsSuccess(true); clearCart(); setUseWallet(false); },
+        onSuccess: (order) => {
+          trackConfirmedPurchase(order);
+          setIsSuccess(true);
+          clearCart();
+          setUseWallet(false);
+        },
         onError: (err: any) => {
           toast({ title: err?.message || "Could not place order. Please try again.", variant: "destructive" });
         },
@@ -1176,7 +1221,12 @@ export function CartDrawer() {
     // COD flow: place order directly
     if (paymentMethod === "cod") {
       createOrder(buildOrderPayload(selected), {
-        onSuccess: () => { setIsSuccess(true); clearCart(); setUseWallet(false); },
+        onSuccess: (order) => {
+          trackConfirmedPurchase(order);
+          setIsSuccess(true);
+          clearCart();
+          setUseWallet(false);
+        },
         onError: (err: any) => {
           toast({ title: err?.message || "Could not place order. Please try again.", variant: "destructive" });
         },

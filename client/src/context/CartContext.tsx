@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo, ReactNode } from "react";
 import type { Product, Coupon } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
+import { trackMetaCommerceEvent } from "@/lib/metaPixel";
 import { useCustomer } from "@/context/CustomerContext";
 import { useProducts } from "@/hooks/use-products";
 import { useHub } from "@/context/HubContext";
@@ -250,6 +251,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
     });
 
     if (acceptedQuantity <= 0) return;
+    const itemPrice = Number(product.price) || 0;
+    trackMetaCommerceEvent("AddToCart", itemPrice * acceptedQuantity, [{
+      id: (product as CartItem).originalId ?? product.id,
+      quantity: acceptedQuantity,
+      price: itemPrice,
+    }]);
     if (modeSwitchMessage) {
       setAppliedCoupon(null);
       toast({
