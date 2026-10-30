@@ -11,7 +11,12 @@ type MetaPixelWindow = Window & {
 export function trackMetaEvent(eventName: string, parameters: Record<string, unknown> = {}) {
   if (typeof window === "undefined") return;
   const fbq = (window as MetaPixelWindow).fbq;
-  if (typeof fbq === "function") fbq("track", eventName, parameters);
+  if (typeof fbq !== "function") return;
+  try {
+    fbq("track", eventName, parameters);
+  } catch (error) {
+    console.warn("[Meta Pixel] Event tracking failed; storefront action continues.", error);
+  }
 }
 
 export function trackMetaCommerceEvent(
